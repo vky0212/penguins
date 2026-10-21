@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>皇帝企鵝寶寶散步</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="description" content="在南極海冰上扮演一隻皇帝企鵝寶寶：搖擺走路、腹部滑行、呼叫爸媽。">
+<meta name="theme-color" content="#0b1522">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@600;900&display=swap">
+<style>
+  /* Layout: full-bleed WebGL scene; frosted field-instrument panels pinned to
+     the safe-area corners; thumb zones bottom-left (stick) and bottom-right (actions). */
+  :root {
+    --night: #0b1522;
+    --glass: rgba(12, 24, 38, 0.52);
+    --glass-strong: rgba(10, 20, 33, 0.82);
+    --line: rgba(206, 228, 247, 0.18);
+    --frost: #e9f2fa;
+    --frost-dim: #a9bfd3;
+    --sun: #f3b46a;
+    --ice: #8fd0f5;
+    --font-display: "Noto Serif TC", "Songti TC", "PMingLiU", serif;
+    --font-body: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
+    --font-data: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    --sat: env(safe-area-inset-top, 0px);
+    --sab: env(safe-area-inset-bottom, 0px);
+    --sal: env(safe-area-inset-left, 0px);
+    --sar: env(safe-area-inset-right, 0px);
+    color-scheme: dark;
+  }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--night);
+    color: var(--frost);
+    font: 14px/1.5 var(--font-body);
+    overflow: hidden;
+    overscroll-behavior: none;
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+  }
+  #scene { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  button { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--sun); outline-offset: 2px; }
+
+  .panel {
+    background: var(--glass);
+    border: 1px solid var(--line);
+    -webkit-backdrop-filter: blur(14px) saturate(1.2);
+    backdrop-filter: blur(14px) saturate(1.2);
+  }
+
+  /* ── HUD ── */
+  .hud {
+    position: fixed; z-index: 5;
+    top: calc(var(--sat) + 12px);
+    left: max(12px, calc(var(--sal) + 12px));
+    right: max(12px, calc(var(--sar) + 12px));
+    display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;
+    pointer-events: none;
+    opacity: 0; transition: opacity .6s ease;
+  }
+  body.playing .hud { opacity: 1; }
+  .readout { pointer-events: auto; border-radius: 14px; padding: 10px 14px 11px; min-width: 0; max-width: 340px; }
+  .loc { font: 500 10.5px/1.2 var(--font-data); letter-spacing: .08em; color: var(--frost-dim); text-transform: uppercase; }
+  .readout dl { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 8px 0 0; }
+  .readout dl div { display: flex; gap: 6px; align-items: baseline; }
+  .readout dt { font-size: 11px; color: var(--frost-dim); letter-spacing: .06em; }
+  .readout dd { margin: 0; font: 500 13px/1.3 var(--font-data); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #hud-surface[data-ice="true"] { color: var(--ice); }
+  .state {
+    display: inline-block; margin-top: 8px; padding: 2px 9px; border-radius: 99px;
+    font-size: 12px; font-weight: 500; color: var(--night); background: var(--sun);
+  }
+  .tools { display: flex; gap: 8px; pointer-events: auto; }
+  .icon-btn {
+    width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; cursor: pointer; padding: 0;
+  }
+  .icon-btn svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  .icon-btn[aria-pressed="false"] .on, .icon-btn[aria-pressed="true"] .off { display: none; }
+  .icon-btn:hover { background: var(--glass-strong); }
+
+  /* ── Actions ── */
+  .actions {
+    position: fixed; z-index: 5;
+    right: max(16px, calc(var(--sar) + 16px));
+    bottom: calc(var(--sab) + 18px);
+    display: grid; grid-template-columns: auto auto; grid-template-areas: ". chirp" "slide hop"; gap: 12px;
+    opacity: 0; pointer-events: none; transition: opacity .6s ease;
+  }
+  body.playing .actions { opacity: 1; pointer-events: auto; }
+  .act {
+    width: 72px; height: 72px; border-radius: 50%;
+    display: grid; place-items: center; align-content: center; gap: 1px;
+    cursor: pointer; padding: 0; touch-action: none;
+    transition: transform .08s ease, background .15s ease;
+  }
+  .act svg { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .act span { font-size: 12px; font-weight: 500; letter-spacing: .04em; }
+  .act kbd { display: none; font: 500 10px var(--font-data); color: var(--frost-dim); }
+  .act.is-down { transform: scale(.92); background: var(--glass-strong); }
+  .act[aria-pressed="true"] { background: var(--sun); color: var(--night); border-color: transparent; }
+  .act[aria-pressed="true"] kbd { color: var(--night); }
+  #act-hop { grid-area: hop; width: 84px; height: 84px; }
+  #act-slide { grid-area: slide; align-self: end; }
+  #act-chirp { grid-area: chirp; justify-self: center; }
+  body:not(.touch) .act { width: 64px; height: 64px; }
+  body:not(.touch) #act-hop { width: 72px; height: 72px; }
+  body:not(.touch) .act kbd { display: block; }
+
+  /* ── Joystick ── */
+  #stick { position: fixed; left: 0; top: 0; z-index: 6; pointer-events: none; }
+  #stick::before {
+    content: ""; position: absolute; width: 120px; height: 120px; left: -60px; top: -60px; border-radius: 50%;
+    border: 1.5px solid rgba(233, 242, 250, .45); background: rgba(12, 24, 38, .25);
+  }
+  #knob {
+    position: absolute; left: 0; top: 0; width: 52px; height: 52px; border-radius: 50%;
+    background: rgba(233, 242, 250, .85); box-shadow: 0 2px 10px rgba(0, 0, 0, .3);
+  }
+
+  #hint {
+    position: fixed; z-index: 4; left: 50%; transform: translateX(-50%);
+    bottom: calc(var(--sab) + 22px); margin: 0; padding: 8px 14px; border-radius: 99px;
+    font-size: 12.5px; color: var(--frost); white-space: nowrap; pointer-events: none;
+    opacity: 0; transition: opacity 1.2s ease;
+  }
+  body.playing #hint { opacity: 1; }
+  body.playing #hint.fade { opacity: 0; }
+  body.touch #hint { bottom: auto; top: calc(var(--sat) + 150px); white-space: normal; text-align: center; max-width: calc(100vw - 48px); }
+  .k-touch { display: none; }
+  body.touch .k-touch { display: inline; }
+  body.touch .k-desk { display: none; }
+
+  /* ── Settings sheet ── */
+  #settings {
+    position: fixed; z-index: 20;
+    top: calc(var(--sat) + 66px); right: max(12px, calc(var(--sar) + 12px));
+    width: min(320px, calc(100vw - 24px)); border-radius: 16px; padding: 16px 18px 18px;
+    background: var(--glass-strong);
+    display: grid; gap: 16px;
+  }
+  #settings header { display: flex; justify-content: space-between; align-items: center; }
+  #settings h2 { margin: 0; font: 600 16px/1.2 var(--font-display); letter-spacing: .04em; }
+  .field { display: grid; gap: 8px; }
+  .field > span, .field label { font-size: 12px; color: var(--frost-dim); letter-spacing: .06em; display: flex; justify-content: space-between; }
+  .field output { font: 500 12px var(--font-data); color: var(--frost); }
+  .seg { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .seg button { background: transparent; border: 0; padding: 9px 0; cursor: pointer; font-size: 13px; }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button[aria-pressed="true"] { background: var(--frost); color: var(--night); font-weight: 500; }
+  input[type="range"] { width: 100%; accent-color: var(--sun); margin: 0; height: 28px; }
+  .note { margin: 0; font-size: 12px; color: var(--frost-dim); line-height: 1.6; }
+
+  /* ── Intro ── */
+  #intro {
+    position: fixed; inset: 0; z-index: 30;
+    display: grid; align-items: end; justify-items: start;
+    padding: calc(var(--sat) + 20px) max(20px, calc(var(--sar) + 20px)) calc(var(--sab) + 24px) max(20px, calc(var(--sal) + 20px));
+    background: linear-gradient(180deg, rgba(11, 21, 34, 0) 30%, rgba(11, 21, 34, .55) 70%, rgba(11, 21, 34, .82));
+    overflow-y: auto; touch-action: pan-y;
+  }
+  .card { width: min(520px, 100%); display: grid; gap: 14px; }
+  .eyebrow { font: 500 11px/1 var(--font-data); letter-spacing: .14em; color: var(--sun); text-transform: uppercase; }
+  .card h1 {
+    margin: 0; font: 900 clamp(40px, 9vw, 68px)/1.05 var(--font-display); letter-spacing: .02em;
+    text-wrap: balance; text-shadow: 0 2px 24px rgba(11, 21, 34, .5);
+  }
+  .latin { font: italic 15px/1.3 Georgia, "Times New Roman", serif; color: var(--frost-dim); margin-top: -6px; }
+  .lede { margin: 0; font-size: 15px; line-height: 1.75; max-width: 34em; color: var(--frost); }
+  .controls { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 2px 0 0; font-size: 13px; }
+  .controls dt { font: 500 12px/1.6 var(--font-data); color: var(--sun); white-space: nowrap; }
+  .controls dd { margin: 0; color: var(--frost-dim); }
+  .start-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 6px; }
+  #btn-start {
+    border: 0; border-radius: 99px; padding: 14px 30px; min-height: 52px;
+    background: var(--sun); color: var(--night); font-size: 16px; font-weight: 700; letter-spacing: .08em; cursor: pointer;
+    transition: transform .12s ease, opacity .3s ease;
+  }
+  #btn-start:disabled { opacity: .55; cursor: progress; }
+  #btn-start:not(:disabled):hover { transform: translateY(-1px); }
+  .load { display: grid; gap: 6px; min-width: 160px; flex: 1; }
+  .load-track { height: 3px; background: var(--line); border-radius: 3px; overflow: hidden; }
+  #load-bar { height: 100%; background: var(--frost); transform-origin: left; transform: scaleX(0); transition: transform .3s ease; }
+  #load-label { font: 400 11.5px/1.4 var(--font-data); color: var(--frost-dim); }
+  body.ready .load-track { display: none; }
+
+  @media (max-width: 560px) {
+    .readout { padding: 8px 11px 9px; }
+    .readout dl { gap: 2px 12px; }
+    .loc { font-size: 9.5px; }
+    .readout dd { font-size: 12px; }
+    .hide-narrow { display: none !important; }
+    .lede { font-size: 14px; }
+  }
+  @media (max-height: 480px) and (orientation: landscape) {
+    #intro { align-items: center; }
+    .card { gap: 10px; }
+    .card h1 { font-size: 38px; }
+    .lede { font-size: 13px; line-height: 1.6; }
+    .controls { display: none; }
+    .act { width: 60px; height: 60px; }
+    #act-hop { width: 70px; height: 70px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="scene" aria-label="南極海冰上的 3D 場景"></canvas>
+
+<header class="hud">
+  <div class="readout panel">
+    <div class="loc">Atka Bay · 70°37′S 08°08′W</div>
+    <dl>
+      <div><dt>氣溫</dt><dd id="hud-temp">−21°C</dd></div>
+      <div><dt>風</dt><dd id="hud-wind">— m/s</dd></div>
+      <div><dt>地表</dt><dd id="hud-surface">雪面</dd></div>
+      <div class="hide-narrow"><dt>走了</dt><dd id="hud-dist">0 m</dd></div>
+    </dl>
+    <div id="hud-state" class="state">站著</div>
+  </div>
+  <div class="tools">
+    <button id="btn-sound" class="icon-btn panel" type="button" aria-pressed="true" aria-label="關閉聲音">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path class="on" d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/><path class="off" d="M16 9.5l5 5M21 9.5l-5 5"/></svg>
+    </button>
+    <button id="btn-settings" class="icon-btn panel" type="button" aria-label="設定" aria-expanded="false" aria-controls="settings">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>
+    </button>
+    <button id="btn-fullscreen" class="icon-btn panel" type="button" aria-label="全螢幕">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+    </button>
+  </div>
+</header>
+
+<section id="settings" class="panel" hidden aria-label="設定">
+  <header>
+    <h2>設定</h2>
+    <button id="btn-close-settings" class="icon-btn" type="button" aria-label="關閉設定" style="background:transparent;border:0">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </header>
+  <div class="field">
+    <span>畫質</span>
+    <div class="seg" role="group" aria-label="畫質">
+      <button type="button" id="q-low" data-quality="low" aria-pressed="false">流暢</button>
+      <button type="button" id="q-medium" data-quality="medium" aria-pressed="false">平衡</button>
+      <button type="button" id="q-high" data-quality="high" aria-pressed="false">精緻</button>
+    </div>
+  </div>
+  <div class="field">
+    <label for="sun">太陽高度 <output id="sun-out" for="sun">11°</output></label>
+    <input id="sun" type="range" min="1" max="40" step="1" value="11">
+  </div>
+  <p class="note">南極的春天，太陽整天都貼著地平線。調低太陽可以看到更長的影子和金色的光。</p>
+</section>
+
+<div id="stick" hidden><div id="knob"></div></div>
+
+<div class="actions">
+  <button id="act-chirp" class="act panel" type="button" aria-label="呼叫爸媽">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h3M7 7l2 2M7 17l2-2"/><path d="M13 8a5 5 0 0 1 0 8M16 5.5a8.5 8.5 0 0 1 0 13"/></svg>
+    <span>叫</span><kbd>C</kbd>
+  </button>
+  <button id="act-slide" class="act panel" type="button" aria-label="腹部滑行" aria-pressed="false">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="13" rx="8" ry="3.5"/><path d="M3 19h18M6 19l-1.5-2M10 19l-1-1.5"/></svg>
+    <span>滑行</span><kbd>E</kbd>
+  </button>
+  <button id="act-hop" class="act panel" type="button" aria-label="跳">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 17V6M7.5 10.5L12 6l4.5 4.5M7 20h10"/></svg>
+    <span>跳</span><kbd>Space</kbd>
+  </button>
+</div>
+
+<p id="hint" class="panel">
+  <span class="k-desk">WASD 走路 · Shift 快步 · 拖曳滑鼠轉視角 · 滾輪縮放</span>
+  <span class="k-touch">左半邊拖曳走路（推到底會快步），右半邊拖曳轉視角，雙指縮放</span>
+</p>
+
+<section id="intro" aria-labelledby="title">
+  <div class="card">
+    <div class="eyebrow">南極 · 海冰上的托兒所</div>
+    <h1 id="title">皇帝企鵝寶寶</h1>
+    <div class="latin">Aptenodytes forsteri · 孵化後約 10 週</div>
+    <p class="lede">七月孵化的小企鵝已經換上一身銀灰色絨毛。爸媽輪流出海捕魚，牠就和其他寶寶擠在托兒所裡等。今天風不大，出去走走：在雪上搖擺、從雪丘上用肚子滑下來，小心藍冰很滑。</p>
+    <dl class="controls">
+      <dt class="k-desk">W A S D</dt><dd class="k-desk">搖擺走路，按住 Shift 快步</dd>
+      <dt class="k-desk">E</dt><dd class="k-desk">趴下腹部滑行，雙腳划雪前進，再按一次站起來</dd>
+      <dt class="k-desk">Space · C</dt><dd class="k-desk">跳一下 · 吹哨呼叫，附近的大企鵝會回應</dd>
+      <dt class="k-touch">左手</dt><dd class="k-touch">在螢幕左半邊拖曳走路，推到底是快步</dd>
+      <dt class="k-touch">右手</dt><dd class="k-touch">拖曳轉視角；按鈕可以跳、腹部滑行、呼叫爸媽</dd>
+    </dl>
+    <div class="start-row">
+      <button id="btn-start" type="button" disabled>載入中…</button>
+      <div class="load">
+        <div class="load-track"><div id="load-bar"></div></div>
+        <div id="load-label">下載 3D 引擎…</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
