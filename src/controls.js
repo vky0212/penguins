@@ -31,7 +31,7 @@ export class FollowCamera {
   update(dt, body, world, followBehind) {
     this.time += dt;
     const lying = body.mode !== 'walk';
-    const want = new THREE.Vector3(body.pos.x, body.pos.y + (lying ? 0.22 : 0.34), body.pos.z);
+    const want = new THREE.Vector3(body.pos.x, body.pos.y + (lying ? 0.2 : 0.4), body.pos.z);
     if (this.first) {
       this.target.copy(want);
       this.first = false;

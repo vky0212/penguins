@@ -13,7 +13,7 @@ export function makeBody(x, z, yaw, world) {
     pos: new THREE.Vector3(x, world.heightAt(x, z), z),
     vel: new THREE.Vector3(),
     yaw,
-    radius: 0.15,
+    radius: 0.12,
     grounded: true,
     mode: 'walk',
     modeT: 0,

@@ -115,7 +115,7 @@ async function boot() {
     const scale = 0.88 + Math.random() * 0.18;
     const chick = new Chick({ shells: Q.npcShells, scale });
     const b = makeBody(x, z, Math.random() * 6.28, world);
-    b.radius = 0.15 * scale;
+    b.radius = 0.12 * scale;
     const npc = { chick, body: b, target: new THREE.Vector3(x, 0, z), wait: Math.random() * 3, pace: 0.45 + Math.random() * 0.35, nextChirp: 4 + Math.random() * 14, replyIn: -1 };
     chick.onStep = (k, fx, fz) => {
       prints.foot(fx, fz, b.yaw, chick.feet[k].side, scale);
