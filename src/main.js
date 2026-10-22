@@ -32,9 +32,9 @@ const store = {
 };
 
 const PRESETS = {
-  low: { dpr: 1, shadow: 1024, shells: 8, npcShells: 5, snow: 1200, drift: 500, bloom: false, msaa: 0 },
-  medium: { dpr: 1.5, shadow: 2048, shells: 14, npcShells: 8, snow: 2600, drift: 1000, bloom: false, msaa: 2 },
-  high: { dpr: 2, shadow: 4096, shells: 22, npcShells: 12, snow: 4500, drift: 1800, bloom: true, msaa: 4 },
+  low: { dpr: 1, shadow: 1024, shells: 10, npcShells: 6, snow: 1200, drift: 500, bloom: false, msaa: 0 },
+  medium: { dpr: 1.5, shadow: 2048, shells: 18, npcShells: 10, snow: 2600, drift: 1000, bloom: false, msaa: 2 },
+  high: { dpr: 2, shadow: 4096, shells: 30, npcShells: 14, snow: 4500, drift: 1800, bloom: true, msaa: 4 },
 };
 let qualityName = store.get('quality', isTouch ? 'medium' : 'high');
 if (!PRESETS[qualityName]) qualityName = 'medium';

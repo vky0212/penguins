@@ -1,24 +1,33 @@
 import * as THREE from 'three';
 import { mergeVertices, mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { ImprovedNoise } from 'three/addons/math/ImprovedNoise.js';
 import { FurPart, paint, smooth, lerp } from './fur.js';
 
-// Emperor penguin chick (Aptenodytes forsteri), crèche age: ~55 cm tall,
-// silver-grey down, black head with a white face mask, short black beak.
+// Emperor penguin chick (Aptenodytes forsteri), crèche age (~10 weeks):
+// ~55 cm tall, pear-shaped and very fluffy, silver-grey down that is darker
+// on the back and paler on the belly. Black crown running from the bill over
+// the back of the head and down the sides of the neck; white cheeks,
+// "goggles" around the eyes, chin and throat. Small dark-brown eyes, slender
+// slightly hooked all-black bill, dark grey scaly feet with strong claws.
 
 const C = (hex) => new THREE.Color(hex);
 const PAL = {
-  greyBack: C('#7a7d82'),
-  greyBelly: C('#b5b8bc'),
-  greyLow: C('#919499'),
-  throat: C('#c6c8cb'),
-  black: C('#121214'),
-  white: C('#f1f1ec'),
-  flipper: C('#75787d'),
+  greyBack: C('#606367'),
+  greyBelly: C('#999c9f'),
+  greyLow: C('#808285'),
+  stain: C('#8a857e'),
+  throat: C('#cfd0ce'),
+  hood: C('#2c2d31'),
+  black: C('#0f0f11'),
+  white: C('#f3f3ef'),
+  flipper: C('#6c6f74'),
 };
 
-const EYE_DIR = new THREE.Vector3(0.56, 0.2, 0.8).normalize();
-const HEAD_SCALE = new THREE.Vector3(1, 0.94, 1.08);
-const HEAD_R = 0.098;
+const HEAD_R = 0.104;
+const HEAD_SCALE = new THREE.Vector3(1, 0.95, 1.06);
+const EYE_DIR = new THREE.Vector3(0.57, 0.22, 0.79).normalize();
+const EYE_DIR_L = EYE_DIR.clone().multiply(new THREE.Vector3(-1, 1, 1));
+const perlin = new ImprovedNoise();
 
 let GEO = null;
 
@@ -30,102 +39,179 @@ function cleanSmooth(g) {
   return g;
 }
 
+// Head shape: flatter crown, fuller cheeks, the face drawn forward into the bill.
+function deformHead(v) {
+  const q = v.clone().divideScalar(HEAD_R);
+  if (q.y > 0) v.y *= 1 - 0.07 * q.y;
+  v.x *= 1 + 0.07 * smooth(0.1, -0.45, q.y) * smooth(-0.3, 0.4, q.z);
+  const muzzle = Math.exp(-((q.x / 0.38) ** 2) - (((q.y + 0.12) / 0.32) ** 2)) * smooth(0.25, 0.9, q.z);
+  v.z += 0.014 * muzzle;
+  v.y -= 0.004 * muzzle;
+  return v.multiply(HEAD_SCALE);
+}
+
 function buildGeometry() {
-  // Body: pear-shaped lathe, plump belly pushed slightly forward.
-  const prof = [[0.0, 0.0], [0.07, 0.004], [0.12, 0.024], [0.15, 0.06], [0.163, 0.11], [0.162, 0.16],
-    [0.15, 0.22], [0.128, 0.275], [0.102, 0.32], [0.085, 0.355], [0.06, 0.385], [0.0, 0.396]];
-  const curve = new THREE.SplineCurve(prof.map(([r, y]) => new THREE.Vector2(r, y)));
-  const pts = curve.getPoints(56);
+  // Body: bell/pear lathe with a broad base, belly pushed forward.
+  const prof = [[0.0, 0.0], [0.08, 0.004], [0.13, 0.024], [0.158, 0.058], [0.169, 0.105], [0.166, 0.155],
+    [0.153, 0.215], [0.13, 0.27], [0.108, 0.316], [0.096, 0.352], [0.07, 0.384], [0.0, 0.396]];
+  const pts = new THREE.SplineCurve(prof.map(([r, y]) => new THREE.Vector2(r, y))).getPoints(64);
   pts[0].x = 0.0001;
   pts[pts.length - 1].x = 0.0001;
-  let body = new THREE.LatheGeometry(pts, 64);
+  let body = new THREE.LatheGeometry(pts, 72);
   const bp = body.attributes.position;
   for (let i = 0; i < bp.count; i++) {
     const y = bp.getY(i), z = bp.getZ(i);
-    if (z > 0) bp.setZ(i, z * (1 + 0.1 * smooth(0.02, 0.12, y) * (1 - smooth(0.24, 0.36, y))));
+    bp.setZ(i, z * (z > 0 ? 1 + 0.1 * smooth(0.02, 0.12, y) * (1 - smooth(0.24, 0.36, y)) : 0.96));
   }
   body = cleanSmooth(body);
   paint(body, (p, n, o) => {
-    const front = smooth(-0.35, 0.65, n.z);
-    o.color.copy(PAL.greyBack).lerp(PAL.greyBelly, front * 0.85);
-    o.color.lerp(PAL.greyLow, smooth(0.07, 0.0, p.y) * 0.6);
-    o.color.lerp(PAL.throat, smooth(0.27, 0.36, p.y) * front * 0.6);
+    const j = perlin.noise(p.x * 40, p.y * 40, p.z * 40) * 0.08;
+    const front = smooth(-0.35, 0.65, n.z + j);
+    o.color.copy(PAL.greyBack).lerp(PAL.greyBelly, front * 0.9);
+    o.color.lerp(PAL.greyLow, smooth(0.08, 0.0, p.y) * 0.6);
+    o.color.lerp(PAL.stain, smooth(0.09, 0.02, p.y) * front * 0.35);
+    // White chin/throat continues onto the upper breast.
+    o.color.lerp(PAL.throat, smooth(0.26, 0.35, p.y + j * 0.2) * smooth(0.2, 0.75, n.z + j) * 0.85);
+    // Black hood edge on the back and sides of the neck.
+    o.color.lerp(PAL.hood, smooth(0.31, 0.37, p.y + j * 0.2) * smooth(0.1, -0.4, n.z + j) * 0.8);
     o.fur = 1 - 0.45 * smooth(0.05, 0.0, p.y) - 0.6 * smooth(0.37, 0.395, p.y);
   });
 
-  // Head: slightly elongated sphere with the face mask painted on.
-  let head = new THREE.SphereGeometry(HEAD_R, 48, 32);
+  let head = new THREE.SphereGeometry(HEAD_R, 64, 44);
   head = cleanSmooth(head);
-  head.scale(HEAD_SCALE.x, HEAD_SCALE.y, HEAD_SCALE.z);
+  const hp = head.attributes.position;
+  const v = new THREE.Vector3();
+  for (let i = 0; i < hp.count; i++) {
+    deformHead(v.fromBufferAttribute(hp, i));
+    hp.setXYZ(i, v.x, v.y, v.z);
+  }
   head.computeVertexNormals();
   const q = new THREE.Vector3();
-  const eyeL = EYE_DIR.clone().multiply(new THREE.Vector3(-1, 1, 1));
   paint(head, (p, n, o) => {
     q.copy(p).divide(HEAD_SCALE).normalize();
-    let mask = smooth(0.11, 0.22, Math.abs(q.x)) * (1 - smooth(0.26, 0.4, q.y)) * smooth(-0.42, -0.12, q.z);
-    const throat = smooth(-0.2, -0.48, q.y) * smooth(-0.05, 0.4, q.z);
-    mask = Math.max(mask, throat * 0.85);
-    o.color.copy(PAL.black).lerp(PAL.white, mask);
-    const eye = Math.max(q.dot(EYE_DIR), q.dot(eyeL));
-    const beak = smooth(0.82, 0.95, q.z) * (1 - smooth(0.2, 0.35, Math.abs(q.y + 0.08)));
-    o.fur = (1 - smooth(0.9, 0.975, eye)) * (1 - beak * 0.85);
+    // Feathery, irregular boundaries between black and white.
+    const j = perlin.noise(p.x * 95, p.y * 95, p.z * 95) * 0.05 + perlin.noise(p.x * 30, p.y * 30, p.z * 30) * 0.03;
+    const ax = Math.abs(q.x) + j;
+    const y = q.y + j * 0.8;
+    const eye = Math.max(q.dot(EYE_DIR), q.dot(EYE_DIR_L));
+    // The upper edge of the white rises around each eye ("goggles").
+    const top = 0.15 + 0.15 * smooth(0.8, 0.97, eye);
+    const goggles = smooth(0.09, 0.16, ax) * smooth(-0.22, 0.0, q.z + j) * (1 - smooth(top - 0.05, top + 0.04, y));
+    const chin = smooth(-0.26, -0.4, y) * smooth(-0.28, 0.12, q.z + j);
+    const white = Math.max(goggles, chin);
+    o.color.copy(PAL.black).lerp(PAL.white, white);
+    // Bare dark skin ring right around the eye.
+    o.color.lerp(PAL.black, smooth(0.975, 0.99, eye));
+    const bill = smooth(0.84, 0.95, q.z) * (1 - smooth(0.16, 0.32, Math.abs(q.y + 0.12))) * (1 - smooth(0.2, 0.35, Math.abs(q.x)));
+    o.fur = (1 - smooth(0.93, 0.985, eye)) * (1 - bill * 0.9) * (0.8 + 0.2 * white);
   });
 
-  // Flipper: flattened ellipsoid hanging from the shoulder.
-  let flip = new THREE.SphereGeometry(1, 24, 16);
+  // Flipper: thin, tapered and swept back toward the tip.
+  let flip = new THREE.SphereGeometry(1, 28, 18);
   flip = cleanSmooth(flip);
-  flip.scale(0.014, 0.105, 0.045);
-  flip.translate(0, -0.088, 0);
+  flip.scale(0.013, 0.112, 0.05);
+  flip.translate(0, -0.095, 0);
+  const fp = flip.attributes.position;
+  for (let i = 0; i < fp.count; i++) {
+    const t = Math.min(1, Math.max(0, -fp.getY(i) / 0.2));
+    fp.setZ(i, fp.getZ(i) * (1 - 0.5 * t) - 0.022 * t * t);
+    fp.setX(i, fp.getX(i) * (1 - 0.35 * t));
+  }
   flip.computeVertexNormals();
   paint(flip, (p, n, o) => {
-    o.color.copy(PAL.flipper).lerp(PAL.greyBelly, smooth(-0.2, 0.6, -n.x) * 0.5);
-    o.fur = 0.75;
+    o.color.copy(PAL.flipper).lerp(PAL.greyBelly, smooth(-0.2, 0.6, -n.x) * 0.45);
+    o.fur = 0.7;
   });
 
-  // Foot: heel pad, three toes and claws.
+  // Foot: heel pad, three thick toes with webbing between them, long claws.
   const parts = [];
-  const heel = new THREE.SphereGeometry(0.024, 14, 10);
+  const heel = new THREE.SphereGeometry(0.027, 16, 10);
   heel.scale(1, 0.42, 1.25);
   parts.push(heel);
-  for (const a of [-0.42, 0, 0.42]) {
-    const toe = new THREE.CapsuleGeometry(0.0095, 0.042, 4, 10);
+  const TOES = [-0.45, 0, 0.45];
+  for (const a of TOES) {
+    const toe = new THREE.CapsuleGeometry(0.0105, 0.05, 4, 12);
     toe.rotateX(Math.PI / 2);
-    toe.scale(1, 0.75, 1);
-    toe.translate(0, -0.002, 0.032);
+    toe.scale(1, 0.72, 1);
+    toe.translate(0, -0.002, 0.036);
+    // Knuckle bumps.
+    const tp = toe.attributes.position;
+    for (let i = 0; i < tp.count; i++) {
+      const z = tp.getZ(i);
+      const k = 1 + 0.08 * Math.max(0, Math.cos((z - 0.02) * 190));
+      tp.setX(i, tp.getX(i) * k);
+      tp.setY(i, tp.getY(i) * k);
+    }
     toe.rotateY(a);
     parts.push(toe);
-    const claw = new THREE.ConeGeometry(0.005, 0.016, 8);
-    claw.rotateX(Math.PI / 2 + 0.25);
-    claw.translate(0, -0.004, 0.066);
+    const claw = new THREE.ConeGeometry(0.0055, 0.02, 10);
+    claw.rotateX(Math.PI / 2 + 0.35);
+    claw.translate(0, -0.005, 0.074);
     claw.rotateY(a);
     parts.push(claw);
   }
+  const web = new THREE.Shape();
+  const tip = (a, r) => [Math.sin(a) * r, Math.cos(a) * r];
+  web.moveTo(...tip(TOES[0], 0.012));
+  web.lineTo(...tip(TOES[0], 0.05));
+  web.quadraticCurveTo(...tip((TOES[0] + TOES[1]) / 2, 0.034), ...tip(TOES[1], 0.052));
+  web.quadraticCurveTo(...tip((TOES[1] + TOES[2]) / 2, 0.034), ...tip(TOES[2], 0.05));
+  web.lineTo(...tip(TOES[2], 0.012));
+  web.lineTo(...tip(TOES[0], 0.012));
+  const webG = new THREE.ShapeGeometry(web, 6);
+  webG.rotateX(Math.PI / 2);
+  webG.translate(0, -0.003, 0);
+  parts.push(webG);
   const foot = mergeGeometries(parts.map((g) => g.index ? g.toNonIndexed() : g));
   foot.computeVertexNormals();
 
-  // Beak: short, slightly hooked, upper and lower mandible.
-  const upper = new THREE.ConeGeometry(0.017, 0.056, 20, 4);
+  // Bill: slender, ridged along the top (culmen), hooked at the tip.
+  const upper = new THREE.ConeGeometry(0.0135, 0.054, 28, 8);
   upper.rotateX(Math.PI / 2);
-  upper.translate(0, 0, 0.028);
-  upper.scale(0.82, 0.62, 1);
+  upper.translate(0, 0, 0.027);
+  upper.scale(0.76, 0.72, 1);
   const up = upper.attributes.position;
-  for (let i = 0; i < up.count; i++) up.setY(i, up.getY(i) - 2.6 * up.getZ(i) ** 2);
+  for (let i = 0; i < up.count; i++) {
+    const x = up.getX(i), y = up.getY(i), z = up.getZ(i);
+    const ridge = y > 0 ? 0.0024 * Math.max(0, 1 - Math.abs(x) / 0.009) * (1 - z / 0.054) : 0;
+    up.setY(i, y + ridge - 3.4 * z * z);
+  }
   upper.computeVertexNormals();
-  const lower = new THREE.ConeGeometry(0.012, 0.044, 16, 3);
+  const lower = new THREE.ConeGeometry(0.0105, 0.046, 24, 6);
   lower.rotateX(Math.PI / 2);
-  lower.translate(0, 0, 0.022);
-  lower.scale(0.8, 0.5, 1);
+  lower.translate(0, 0, 0.023);
+  lower.scale(0.72, 0.45, 1);
+  const lp = lower.attributes.position;
+  for (let i = 0; i < lp.count; i++) lp.setY(i, lp.getY(i) - 1.6 * lp.getZ(i) ** 2);
+  lower.computeVertexNormals();
 
-  return { body, head, flip, foot, upper, lower, eye: new THREE.SphereGeometry(0.0098, 18, 12) };
+  // Where the bill meets the face, and where the eyes sit on the surface.
+  let billBase = 0;
+  for (let i = 0; i < hp.count; i++) {
+    if (Math.abs(hp.getX(i)) < 0.012 && Math.abs(hp.getY(i) + 0.016) < 0.012) billBase = Math.max(billBase, hp.getZ(i));
+  }
+  const eyePos = deformHead(EYE_DIR.clone().multiplyScalar(HEAD_R)).multiplyScalar(0.975);
+
+  return {
+    body, head, flip, foot, upper, lower,
+    eye: new THREE.SphereGeometry(0.0086, 20, 14),
+    lid: new THREE.SphereGeometry(0.0096, 20, 10, 0, Math.PI * 2, 0, Math.PI / 2),
+    ring: new THREE.TorusGeometry(0.0088, 0.0016, 8, 28),
+    billBase: billBase - 0.004,
+    eyePos,
+  };
 }
 
-const footMat = new THREE.MeshStandardMaterial({ color: C('#2a2b30'), roughness: 0.55 });
-const beakMat = new THREE.MeshPhysicalMaterial({ color: C('#0e0e10'), roughness: 0.32, clearcoat: 0.5, clearcoatRoughness: 0.3 });
-const eyeMat = new THREE.MeshPhysicalMaterial({ color: C('#070504'), roughness: 0.05, clearcoat: 1, clearcoatRoughness: 0.02 });
+const footMat = new THREE.MeshStandardMaterial({ color: C('#2b2c31'), roughness: 0.62, side: THREE.DoubleSide });
+const beakMat = new THREE.MeshPhysicalMaterial({ color: C('#0d0d0f'), roughness: 0.3, clearcoat: 0.6, clearcoatRoughness: 0.25 });
+const eyeMat = new THREE.MeshPhysicalMaterial({ color: C('#1d120b'), roughness: 0.05, clearcoat: 1, clearcoatRoughness: 0.02 });
+const ringMat = new THREE.MeshStandardMaterial({ color: C('#151517'), roughness: 0.5 });
+const lidMat = new THREE.MeshStandardMaterial({ color: C('#2e2f33'), roughness: 0.8 });
 
 const _q = new THREE.Quaternion();
 const _v = new THREE.Vector3();
 const _acc = new THREE.Vector3();
+const Z = new THREE.Vector3(0, 0, 1);
 
 export class Chick {
   constructor({ shells = 16, scale = 1 } = {}) {
@@ -140,44 +226,56 @@ export class Chick {
     this.breath = new THREE.Group();
     this.pivot.add(this.breath);
 
-    this.body = new FurPart(GEO.body, { length: 0.034, density: 260, maxShells: 24, tip: 1.18 });
+    this.body = new FurPart(GEO.body, { length: 0.046, density: 300, maxShells: 32, tip: 1.14, comb: 0.35, tuft: 0.27, snow: 0.35 });
     this.body.position.y = -0.14;
     this.breath.add(this.body);
 
     this.headPivot = new THREE.Group();
-    this.headPivot.position.set(0, 0.21, 0.004);
+    this.headPivot.position.set(0, 0.205, 0.004);
     this.headPivot.rotation.order = 'YXZ';
     this.breath.add(this.headPivot);
     const headGroup = new THREE.Group();
-    headGroup.position.set(0, 0.075, 0.02);
+    headGroup.position.set(0, 0.062, 0.022);
     this.headPivot.add(headGroup);
-    this.head = new FurPart(GEO.head, { length: 0.016, density: 330, maxShells: 24, tip: 1.08, rootColor: 0.7 });
+    this.head = new FurPart(GEO.head, { length: 0.021, density: 380, maxShells: 32, tip: 1.0, comb: 0.45, tuft: 0.34, snow: 0.1, rootColor: 0.75 });
     headGroup.add(this.head);
 
     this.eyes = [];
+    this.lids = [];
     for (const sx of [-1, 1]) {
+      const dir = EYE_DIR.clone().multiply(new THREE.Vector3(sx, 1, 1));
+      const pos = GEO.eyePos.clone().multiply(new THREE.Vector3(sx, 1, 1));
       const e = new THREE.Mesh(GEO.eye, eyeMat);
-      const d = EYE_DIR.clone().multiply(new THREE.Vector3(sx, 1, 1)).multiplyScalar(HEAD_R * 0.93).multiply(HEAD_SCALE);
-      e.position.copy(d);
+      e.position.copy(pos);
       headGroup.add(e);
       this.eyes.push(e);
+      const ring = new THREE.Mesh(GEO.ring, ringMat);
+      ring.position.copy(pos).addScaledVector(dir, 0.0035);
+      ring.quaternion.setFromUnitVectors(Z, dir);
+      headGroup.add(ring);
+      const lid = new THREE.Mesh(GEO.lid, lidMat);
+      lid.position.copy(pos);
+      lid.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+      lid.visible = false;
+      headGroup.add(lid);
+      this.lids.push(lid);
     }
-    const beakBase = new THREE.Vector3(0, -0.012, HEAD_R * HEAD_SCALE.z * 0.9);
+    const beakBase = new THREE.Vector3(0, -0.016, GEO.billBase);
     this.beakUpper = new THREE.Mesh(GEO.upper, beakMat);
     this.beakUpper.position.copy(beakBase);
-    this.beakUpper.rotation.x = 0.12;
+    this.beakUpper.rotation.x = 0.14;
     this.beakUpper.castShadow = true;
     headGroup.add(this.beakUpper);
     this.beakLower = new THREE.Mesh(GEO.lower, beakMat);
-    this.beakLower.position.copy(beakBase).add(new THREE.Vector3(0, -0.009, -0.004));
-    this.beakLower.rotation.x = 0.16;
+    this.beakLower.position.copy(beakBase).add(new THREE.Vector3(0, -0.008, -0.004));
+    this.beakLower.rotation.x = 0.17;
     headGroup.add(this.beakLower);
 
     this.flippers = [];
     for (const sx of [-1, 1]) {
       const pv = new THREE.Group();
-      pv.position.set(sx * 0.132, 0.1, -0.005);
-      const f = new FurPart(GEO.flip, { length: 0.011, density: 300, maxShells: 12, tip: 1.1 });
+      pv.position.set(sx * 0.138, 0.1, -0.005);
+      const f = new FurPart(GEO.flip, { length: 0.013, density: 340, maxShells: 16, tip: 1.12, comb: 0.6, tuft: 0.35, snow: 0.3 });
       pv.add(f);
       this.breath.add(pv);
       this.flippers.push({ pv, part: f, side: sx });
@@ -213,6 +311,7 @@ export class Chick {
     this.body.setShells(n);
     this.head.setShells(n);
     for (const f of this.flippers) f.part.setShells(Math.ceil(n / 2));
+
   }
 
   chirp() {
@@ -275,7 +374,7 @@ export class Chick {
     this.blinkT -= dt;
     const blink = this.blinkT < 0.12 ? 0.12 : 1;
     if (this.blinkT < 0) this.blinkT = 2 + Math.random() * 4;
-    for (const e of this.eyes) e.scale.y = blink;
+    for (const l of this.lids) l.visible = blink < 1;
 
     // Flippers: held out for balance, wider when running, sliding or airborne.
     const flap = c * (0.35 + 0.35 * Math.sin(t * 24)) + (st.mode === 'tumble' ? Math.sin(t * 18) * 0.5 : 0);
