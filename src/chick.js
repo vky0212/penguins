@@ -10,9 +10,11 @@ import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 //  - the head and neck lift so the chick looks ahead while lying;
 //  - the flippers spread for balance.
 // The model's skeletons are partly flattened (many joints hang straight off
-// the root), so joints can't be posed through the hierarchy. Instead each
-// joint is classified by where the vertices it moves sit (head, flippers),
-// and those joints get a rigid world-space rotation after the animation.
+// the root, pivoting far from the vertices they move), so joints can't be
+// posed through the hierarchy, and clips can't be blended joint by joint.
+// Clips are blended as posed joint matrices, and for the procedural pose
+// each joint is classified by where its vertices sit (head, flippers) and
+// gets a rigid world-space rotation.
 
 const HEIGHT = 0.62;
 const WALK_STRIDE_SPEED = 0.275; // m/s covered by the walk_A1 cycle at timeScale 1
@@ -146,8 +148,14 @@ export async function loadChickAsset(urls, onProgress) {
   mixer.stopAllAction();
   mixer.uncacheRoot(scene);
 
+  // Every node a clip animates, so each clip can start from the rest pose.
+  const animated = new Set();
+  for (const clip of Object.values(clips)) {
+    for (const track of clip.tracks) animated.add(THREE.PropertyBinding.parseTrackName(track.name).nodeName);
+  }
+
   ASSET = {
-    scene, clips, materials, joints, height,
+    scene, clips, materials, joints, height, animated: [...animated],
     neck: new THREE.Vector3(0, neckY, headPos.z - height * 0.05),
     shoulderL: new THREE.Vector3(halfWidth * 0.55, shoulderY || height * 0.7, 0),
     shoulderR: new THREE.Vector3(-halfWidth * 0.55, shoulderY || height * 0.7, 0),
@@ -166,6 +174,7 @@ const _m = new THREE.Matrix4();
 const _r = new THREE.Matrix4();
 const _t = new THREE.Matrix4();
 const _hinv = new THREE.Matrix4();
+const _minv = new THREE.Matrix4();
 const _v = new THREE.Vector3();
 const AX_X = new THREE.Vector3(1, 0, 0);
 const AX_Z = new THREE.Vector3(0, 0, 1);
@@ -176,6 +185,8 @@ function pivotRotation(pivot, axis, angle, out) {
   out.multiply(_r.makeRotationAxis(axis, angle));
   return out.multiply(_t.makeTranslation(-pivot.x, -pivot.y, -pivot.z));
 }
+
+const LAYERS = ['idle', 'idleFlap', 'walk', 'callA', 'callB'];
 
 export class Chick {
   constructor({ scale = 1 } = {}) {
@@ -189,36 +200,50 @@ export class Chick {
     this.model = cloneSkinned(ASSET.scene);
     this.holder.add(this.model);
 
+    // Unique joints across all skins (the eye and eye-lens skins share
+    // theirs), each with its head/flipper classification.
     this.skins = [];
     this.model.traverse((o) => { if (o.isSkinnedMesh) this.skins.push(o); });
-    this.toes = { L: [], R: [] };
-    for (const s of this.skins) {
-      for (const b of s.skeleton.bones) {
-        if (/^LegToeL/.test(b.name)) this.toes.L.push(b);
-        if (/^LegToeR/.test(b.name)) this.toes.R.push(b);
-      }
-    }
+    const seen = new Map();
+    this.skins.forEach((mesh, mi) => {
+      mesh.skeleton.bones.forEach((bone, bi) => {
+        const j = ASSET.joints[mi][bi];
+        const prev = seen.get(bone);
+        if (!prev) seen.set(bone, { bone, head: j.head, flip: j.flip });
+        else if (!prev.head && !prev.flip) Object.assign(prev, { head: j.head, flip: j.flip });
+      });
+    });
+    this.joints = [...seen.values()];
+    this.toes = {
+      L: this.joints.filter((j) => /^LegToeL/.test(j.bone.name)).map((j) => j.bone),
+      R: this.joints.filter((j) => /^LegToeR/.test(j.bone.name)).map((j) => j.bone),
+    };
 
-    this.mixer = new THREE.AnimationMixer(this.model);
-    const act = (clip) => {
-      const a = this.mixer.clipAction(clip);
-      a.play();
-      a.setEffectiveWeight(0);
-      return a;
-    };
-    this.actions = {
-      idle: act(ASSET.clips.idle),
-      idleFlap: act(ASSET.clips.idleFlap),
-      walk: act(ASSET.clips.walk),
-      callA: act(ASSET.clips.callA),
-      callB: act(ASSET.clips.callB),
-    };
-    for (const k of ['callA', 'callB']) {
-      this.actions[k].setLoop(THREE.LoopOnce, 1);
-      this.actions[k].clampWhenFinished = true;
+    // Each clip is sampled on its own and clips are blended by mixing the
+    // posed joint matrices, not joint rotations: many of this rig's joints
+    // pivot far from the vertices they move, and interpolating their
+    // rotations swings those vertices through wide arcs mid-blend (the face
+    // and beak flop around). Skinning is linear, so mixing the matrices
+    // blends the posed meshes exactly.
+    this.animated = ASSET.animated.map((n) => this.model.getObjectByName(n)).filter(Boolean);
+    this.rest = this.animated.map((o) => [o.position.clone(), o.quaternion.clone(), o.scale.clone()]);
+    this.layers = {};
+    for (const key of LAYERS) {
+      const clip = ASSET.clips[key];
+      const channels = [];
+      for (const track of clip.tracks) {
+        const { nodeName, propertyName } = THREE.PropertyBinding.parseTrackName(track.name);
+        const node = this.model.getObjectByName(nodeName);
+        if (node && node[propertyName]?.fromArray) channels.push({ target: node[propertyName], interp: track.createInterpolant() });
+      }
+      this.layers[key] = {
+        clip, channels, time: 0, timeScale: 1, once: key.startsWith('call'),
+        w: 0, pending: 0, pose: new Float32Array(this.joints.length * 16), posed: false,
+      };
     }
-    this.actions.idle.time = Math.random() * ASSET.clips.idle.duration;
-    this.actions.walk.time = Math.random() * ASSET.clips.walk.duration;
+    this.layers.idle.time = Math.random() * ASSET.clips.idle.duration;
+    this.layers.walk.time = Math.random() * ASSET.clips.walk.duration;
+    this.blend = new Float32Array(16);
 
     this.time = Math.random() * 10;
     this.walkW = 0;
@@ -235,14 +260,38 @@ export class Chick {
     this.headLift = 0;
     this.flipSpread = 0;
     this.tumbleRoll = 0;
+    this.stepping = false;
+    this.groundY = 0;
   }
 
   chirp() {
-    const a = Math.random() < 0.5 ? this.actions.callA : this.actions.callB;
-    this.call = a;
-    this.callT = a.getClip().duration;
-    a.reset();
-    a.play();
+    const key = Math.random() < 0.5 ? 'callA' : 'callB';
+    const layer = this.layers[key];
+    this.call = key;
+    this.callT = layer.clip.duration;
+    layer.time = 0;
+    layer.pending = 0;
+  }
+
+  // Advances one clip, samples it from the rest pose and stores the joint
+  // matrices relative to the model root.
+  _poseLayer(layer, dt) {
+    const d = layer.clip.duration;
+    layer.time += dt * layer.timeScale;
+    layer.time = layer.once ? Math.min(layer.time, d) : ((layer.time % d) + d) % d;
+    this.animated.forEach((o, i) => {
+      const r = this.rest[i];
+      o.position.copy(r[0]);
+      o.quaternion.copy(r[1]);
+      o.scale.copy(r[2]);
+    });
+    for (const c of layer.channels) c.target.fromArray(c.interp.evaluate(layer.time));
+    this.model.updateMatrixWorld(true);
+    _minv.copy(this.model.matrixWorld).invert();
+    this.joints.forEach((j, i) => {
+      _m.multiplyMatrices(_minv, j.bone.matrixWorld).toArray(layer.pose, i * 16);
+    });
+    layer.posed = true;
   }
 
   // st: { pos, yaw, vel, speed, grounded, mode, pushing, slopeF, world, camDist }
@@ -260,7 +309,7 @@ export class Chick {
     let callW = 0;
     if (this.call) {
       this.callT = Math.max(0, this.callT - dt);
-      const elapsed = this.call.getClip().duration - this.callT;
+      const elapsed = this.layers[this.call].clip.duration - this.callT;
       callW = smooth(0, 0.25, elapsed) * smooth(0, 0.35, this.callT);
       if (this.callT === 0) this.call = null;
     }
@@ -276,19 +325,27 @@ export class Chick {
     const paddle = lying && st.pushing ? 1 : 0;
     const walkWeight = Math.max(this.walkW * (1 - s), paddle * s);
     const rest = (1 - walkWeight) * (1 - callW);
-    const A = this.actions;
-    A.walk.setEffectiveWeight(walkWeight * (1 - callW));
-    A.idle.setEffectiveWeight(rest * (1 - this.flapMix * (1 - s)));
-    A.idleFlap.setEffectiveWeight(rest * this.flapMix * (1 - s));
-    A.callA.setEffectiveWeight(this.call === A.callA ? callW : 0);
-    A.callB.setEffectiveWeight(this.call === A.callB ? callW : 0);
-    A.walk.timeScale = lying ? 2.4 : THREE.MathUtils.clamp(st.speed / (WALK_STRIDE_SPEED * this.scale), 0.6, 3.4);
+    const L = this.layers;
+    L.walk.w = walkWeight * (1 - callW);
+    L.idle.w = rest * (1 - this.flapMix * (1 - s));
+    L.idleFlap.w = rest * this.flapMix * (1 - s);
+    L.callA.w = this.call === 'callA' ? callW : 0;
+    L.callB.w = this.call === 'callB' ? callW : 0;
+    L.walk.timeScale = lying ? 2.4 : THREE.MathUtils.clamp(st.speed / (WALK_STRIDE_SPEED * this.scale), 0.6, 3.4);
 
-    // Distant chicks animate at a lower rate.
+    // Only clips that contribute advance and get evaluated; distant chicks
+    // at a lower rate.
+    for (const key of LAYERS) L[key].pending += dt;
     this.mixAcc += dt;
     if (this.mixAcc >= ((st.camDist ?? 0) > 18 ? 0.1 : 0)) {
-      this.mixer.update(this.mixAcc);
       this.mixAcc = 0;
+      for (const key of LAYERS) {
+        const layer = L[key];
+        if (layer.w > 1e-3 || !layer.posed) {
+          this._poseLayer(layer, layer.pending);
+          layer.pending = 0;
+        }
+      }
     }
 
     this.root.position.copy(st.pos);
@@ -304,44 +361,55 @@ export class Chick {
 
     this.headLift = s * 1.05;
     this.flipSpread = s * 0.9 + this.airW * 0.5 + (st.mode === 'tumble' ? Math.sin(t * 16) * 0.4 : 0);
-
-    // Footfalls: a foot lands when its lowest toe comes down to the ground.
-    if (walking && this.walkW > 0.3) {
-      this.root.updateMatrixWorld(true);
-      for (const side of ['L', 'R']) {
-        let low = Infinity, lx = 0, lz = 0;
-        for (const b of this.toes[side]) {
-          b.getWorldPosition(_v);
-          if (_v.y < low) { low = _v.y; lx = _v.x; lz = _v.z; }
-        }
-        const h = low - st.pos.y;
-        const f = this.feet[side];
-        if (!f.down && h < 0.012 * this.scale) {
-          f.down = true;
-          this.onStep?.(side === 'L' ? -1 : 1, lx, lz);
-        } else if (f.down && h > 0.025 * this.scale) {
-          f.down = false;
-        }
-      }
-    }
+    this.stepping = walking && this.walkW > 0.3;
+    this.groundY = st.pos.y;
   }
 
-  // Call after scene.updateMatrixWorld(): layers the procedural pose on top of
-  // the animated skeleton by transforming joint world matrices directly.
+  // Call after scene.updateMatrixWorld(): writes the blended clip pose plus
+  // the procedural belly pose straight into the joint world matrices.
   applyPose() {
-    if (this.headLift < 1e-3 && Math.abs(this.flipSpread) < 1e-3) return;
-    const H = this.holder.matrixWorld;
-    _hinv.copy(H).invert();
-    this.skins.forEach((mesh, mi) => {
-      const bones = mesh.skeleton.bones;
-      for (const j of ASSET.joints[mi]) {
+    const layers = LAYERS.map((k) => this.layers[k]).filter((l) => l.w > 1e-3 && l.posed);
+    const total = layers.reduce((a, l) => a + l.w, 0) || 1;
+    const Mw = this.model.matrixWorld;
+    const B = this.blend;
+    this.joints.forEach((j, i) => {
+      B.fill(0);
+      for (const l of layers) {
+        const w = l.w / total;
+        for (let k = 0; k < 16; k++) B[k] += l.pose[i * 16 + k] * w;
+      }
+      j.bone.matrixWorld.fromArray(B).premultiply(Mw);
+    });
+
+    if (this.headLift > 1e-3 || Math.abs(this.flipSpread) > 1e-3) {
+      const H = this.holder.matrixWorld;
+      _hinv.copy(H).invert();
+      for (const j of this.joints) {
         if (j.head) pivotRotation(ASSET.neck, AX_X, -this.headLift * j.head, _m);
         else if (j.flip) pivotRotation(j.flip > 0 ? ASSET.shoulderL : ASSET.shoulderR, AX_Z, this.flipSpread * j.flip, _m);
         else continue;
         // Model-space rigid transform to world space: H · M · H⁻¹.
         _m.premultiply(H).multiply(_hinv);
-        bones[j.index].matrixWorld.premultiply(_m);
+        j.bone.matrixWorld.premultiply(_m);
       }
-    });
+    }
+
+    // Footfalls: a foot lands when its lowest toe comes down to the ground.
+    if (!this.stepping) return;
+    for (const side of ['L', 'R']) {
+      let low = Infinity, lx = 0, lz = 0;
+      for (const b of this.toes[side]) {
+        _v.setFromMatrixPosition(b.matrixWorld);
+        if (_v.y < low) { low = _v.y; lx = _v.x; lz = _v.z; }
+      }
+      const h = low - this.groundY;
+      const f = this.feet[side];
+      if (!f.down && h < 0.012 * this.scale) {
+        f.down = true;
+        this.onStep?.(side === 'L' ? -1 : 1, lx, lz);
+      } else if (f.down && h > 0.025 * this.scale) {
+        f.down = false;
+      }
+    }
   }
 }
