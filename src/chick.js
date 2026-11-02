@@ -1,6 +1,6 @@
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
+import { loadModel } from './model.js';
 
 // Emperor penguin chick (Aptenodytes forsteri), crèche age, ~62 cm tall.
 // Rigged model with fur cards (assets/chick.glb, built by tools/chick-model).
@@ -28,54 +28,9 @@ const smooth = (e0, e1, x) => {
 };
 const lerp = (a, b, t) => a + (b - a) * t;
 
-// Fetches the first URL that answers, with download progress. A `.txt` URL
-// holds the same GLB as base64, for hosts that don't serve .glb files.
-async function fetchModel(urls, onProgress) {
-  for (const url of urls) {
-    let res;
-    try {
-      res = await fetch(url);
-    } catch {
-      continue;
-    }
-    if (!res.ok) continue;
-    const total = Number(res.headers.get('content-length')) || 0;
-    const chunks = [];
-    let loaded = 0;
-    const reader = res.body.getReader();
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      loaded += value.length;
-      if (total) onProgress?.(Math.min(1, loaded / total));
-    }
-    let bytes = new Uint8Array(loaded);
-    let o = 0;
-    for (const c of chunks) {
-      bytes.set(c, o);
-      o += c.length;
-    }
-    if (url.endsWith('.txt')) {
-      const bin = atob(new TextDecoder().decode(bytes).trim());
-      bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    }
-    return bytes.buffer;
-  }
-  throw new Error('找不到企鵝寶寶模型檔案');
-}
-
 export async function loadChickAsset(urls, onProgress) {
-  const loader = new GLTFLoader();
-  // Decode embedded textures through <img> rather than fetch()+ImageBitmap,
-  // so blob: image URLs work under strict content security policies.
-  loader.register((parser) => {
-    parser.textureLoader = new THREE.TextureLoader(parser.options.manager);
-    parser.textureLoader.setCrossOrigin('anonymous');
-    return { name: 'img-textures' };
-  });
-  const gltf = await loader.parseAsync(await fetchModel(urls, onProgress), '');
+  const gltf = await loadModel(urls, onProgress);
+  if (!gltf) throw new Error('找不到企鵝寶寶模型檔案');
   const scene = gltf.scene;
   const clips = {};
   for (const [key, name] of Object.entries(CLIP)) {

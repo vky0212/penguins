@@ -1,27 +1,23 @@
 import * as THREE from 'three';
-import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
+import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
+import { loadModel } from './model.js';
 
-// Adult emperor penguin: ~1.1 m, black back and head, white belly, pale
-// yellow breast, orange-yellow ear patches, long beak with a pink-orange
-// mandibular plate. Sleek feathers, so a glossy material instead of fur.
+// Adult emperor penguin, ~1.1 m. Rigged model with feather cards
+// (assets/adult.glb, built by tools/chick-model/prepare-adult.mjs). The
+// source has no clips and its rest pose bows the head toward a chick, so all
+// motion is procedural: the head lifts, looks around and dips for calls, the
+// flippers sway and the body rocks. As with the chick, the skeleton is partly
+// flattened, so joints are classified by the vertices they move (head,
+// flippers) and get rigid world-space rotations instead of being posed
+// through the hierarchy.
 
-// Writes per-vertex colours from a painter callback.
-function paint(geo, fn) {
-  const pos = geo.attributes.position, nor = geo.attributes.normal;
-  const col = new Float32Array(pos.count * 3);
-  const p = new THREE.Vector3(), n = new THREE.Vector3();
-  const out = { color: new THREE.Color() };
-  for (let i = 0; i < pos.count; i++) {
-    p.fromBufferAttribute(pos, i);
-    n.fromBufferAttribute(nor, i);
-    fn(p, n, out);
-    col[i * 3] = out.color.r;
-    col[i * 3 + 1] = out.color.g;
-    col[i * 3 + 2] = out.color.b;
-  }
-  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
-  return geo;
-}
+const HEIGHT = 1.1;
+// The rest pose looks down at about 60°; this lift brings the bill up to a
+// relaxed standing angle.
+const HEAD_LIFT = 0.9;
+const HEAD_MESHES = ['penguin_peck', 'penguin_tongue', 'penguin_eyes', 'penguin_eyelens'];
+
+let ASSET = null;
 
 const smooth = (e0, e1, x) => {
   const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
@@ -29,157 +25,145 @@ const smooth = (e0, e1, x) => {
 };
 const lerp = (a, b, t) => a + (b - a) * t;
 
-const C = (hex) => new THREE.Color(hex);
-const PAL = {
-  black: C('#0d0e11'),
-  slate: C('#2a2f38'),
-  white: C('#efeee8'),
-  breast: C('#f5dc9a'),
-  ear: C('#f2a531'),
-  plate: C('#e9876a'),
-};
-
-let GEO = null;
-function clean(g) {
-  g.deleteAttribute('uv');
-  g.deleteAttribute('normal');
-  g = mergeVertices(g, 1e-5);
-  g.computeVertexNormals();
-  return g;
-}
-
-function build() {
-  const prof = [[0, 0], [0.12, 0.012], [0.2, 0.05], [0.235, 0.14], [0.246, 0.28], [0.236, 0.42], [0.205, 0.56],
-    [0.166, 0.69], [0.13, 0.79], [0.104, 0.87], [0.086, 0.93], [0.05, 0.975], [0, 0.99]];
-  const pts = new THREE.SplineCurve(prof.map(([r, y]) => new THREE.Vector2(r, y))).getPoints(64);
-  pts[0].x = 0.0001;
-  pts[pts.length - 1].x = 0.0001;
-  let body = new THREE.LatheGeometry(pts, 56);
-  const bp = body.attributes.position;
-  for (let i = 0; i < bp.count; i++) {
-    const y = bp.getY(i), z = bp.getZ(i);
-    bp.setZ(i, z * (z > 0 ? 1 + 0.12 * smooth(0.1, 0.4, y) * (1 - smooth(0.55, 0.8, y)) : 0.92));
-  }
-  body = clean(body);
-  paint(body, (p, n, o) => {
-    const y = p.y;
-    const edge = -0.3 + 0.62 * smooth(0.45, 0.92, y);
-    const wht = smooth(edge - 0.1, edge + 0.06, n.z) * (1 - smooth(0.93, 0.97, y));
-    o.color.copy(PAL.black).lerp(PAL.slate, smooth(0.3, -0.6, n.z) * 0.35);
-    o.color.lerp(PAL.white, wht);
-    o.color.lerp(PAL.breast, smooth(0.55, 0.78, y) * wht * 0.8);
-    const ear = smooth(0.8, 0.9, y) * smooth(0.25, 0.55, Math.abs(n.x)) * smooth(-0.45, -0.05, n.z) * (1 - smooth(0.95, 0.98, y));
-    o.color.lerp(PAL.ear, ear * 0.9);
+export async function loadAdultAsset(urls, onProgress) {
+  const gltf = await loadModel(urls, onProgress);
+  if (!gltf) throw new Error('找不到帝企鵝模型檔案');
+  const scene = gltf.scene;
+  const materials = new Set();
+  scene.traverse((o) => {
+    if (!o.isMesh) return;
+    o.castShadow = true;
+    o.receiveShadow = true;
+    o.frustumCulled = false;
+    materials.add(o.material);
+    if (o.material.name === 'penguin_feather') {
+      o.material.alphaTest = 0.5;
+      o.material.roughness = 0.6;
+      o.material.color.setScalar(1.3);
+    }
   });
 
-  let head = new THREE.SphereGeometry(0.075, 40, 28);
-  head = clean(head);
-  head.scale(0.95, 0.9, 1.25);
-  head.computeVertexNormals();
-  const q = new THREE.Vector3();
-  paint(head, (p, n, o) => {
-    q.copy(p).normalize();
-    const ear = smooth(0.4, 0.62, Math.abs(q.x)) * smooth(-0.75, -0.45, q.z) * (1 - smooth(-0.05, 0.25, q.z)) * (1 - smooth(0.1, 0.35, q.y));
-    o.color.copy(PAL.black).lerp(PAL.ear, ear);
+  // Classify every joint by the vertices it moves, in the rest pose.
+  scene.updateMatrixWorld(true);
+  const box = new THREE.Box3();
+  const feet = new THREE.Box3();
+  const v = new THREE.Vector3();
+  const joints = []; // per skinned mesh, in traversal order
+  scene.traverse((o) => {
+    if (!o.isSkinnedMesh) return;
+    const geo = o.geometry;
+    const si = geo.attributes.skinIndex, sw = geo.attributes.skinWeight;
+    const n = geo.attributes.position.count;
+    const sums = o.skeleton.bones.map(() => [0, 0, 0, 0]);
+    for (let i = 0; i < n; i++) {
+      o.getVertexPosition(i, v).applyMatrix4(o.matrixWorld);
+      box.expandByPoint(v);
+      if (o.name === 'penguin_leg') feet.expandByPoint(v);
+      for (let k = 0; k < 4; k++) {
+        const w = sw.getComponent(i, k);
+        if (w <= 0) continue;
+        const s = sums[si.getComponent(i, k)];
+        s[0] += v.x * w;
+        s[1] += v.y * w;
+        s[2] += v.z * w;
+        s[3] += w;
+      }
+    }
+    joints.push({
+      headOnly: HEAD_MESHES.includes(o.name),
+      c: sums.map((s) => (s[3] > 0 ? [s[0] / s[3], s[1] / s[3], s[2] / s[3]] : null)),
+    });
   });
+  // Model units: y up, +z forward, the bird's left at +x. The bowed head
+  // hangs in front of the chest, the bill tip down at breast height, so the
+  // bill, tongue and eyes belong to the head outright; body and feather
+  // joints count as head when they sit forward of the neck and above the
+  // breast.
+  const height = box.max.y - Math.min(0, box.min.y);
+  const halfWidth = Math.max(-box.min.x, box.max.x);
+  let shoulderY = 0;
+  const classified = joints.map(({ headOnly, c: list }) => list.map((c) => {
+    if (!c) return { head: 0, flip: 0 };
+    if (headOnly) return { head: 1, flip: 0 };
+    const head = smooth(0, 0.07 * height, c[2]) * smooth(0.64 * height, 0.72 * height, c[1]);
+    const flip = Math.sign(c[0]) * smooth(halfWidth * 0.55, halfWidth * 0.72, Math.abs(c[0])) * (1 - head);
+    if (flip) shoulderY = Math.max(shoulderY, c[1]);
+    return { head, flip };
+  }));
 
-  const beak = new THREE.ConeGeometry(0.017, 0.125, 20, 8);
-  beak.rotateX(Math.PI / 2);
-  beak.translate(0, 0, 0.0625);
-  beak.scale(0.7, 1, 1);
-  const kp = beak.attributes.position;
-  for (let i = 0; i < kp.count; i++) kp.setY(i, kp.getY(i) - 2.2 * kp.getZ(i) ** 2);
-  beak.computeVertexNormals();
-  paint(beak, (p, n, o) => {
-    const plate = smooth(0.0, -0.006, p.y) * smooth(-0.2, 0.3, Math.abs(n.x)) * (1 - smooth(0.06, 0.09, p.z));
-    o.color.copy(PAL.black).lerp(PAL.plate, plate);
-  });
-
-  let flip = new THREE.SphereGeometry(1, 20, 14);
-  flip = clean(flip);
-  flip.scale(0.016, 0.19, 0.06);
-  flip.translate(0, -0.17, 0);
-  flip.computeVertexNormals();
-  paint(flip, (p, n, o) => o.color.copy(PAL.black).lerp(PAL.white, smooth(0.2, 0.7, -n.x) * 0.35));
-
-  const foot = new THREE.SphereGeometry(0.05, 14, 8);
-  foot.scale(0.9, 0.3, 1.3);
-  foot.translate(0, 0.012, 0.05);
-  return { body, head, beak, flip, foot };
-}
-
-let MAT = null;
-function mats() {
-  MAT ??= {
-    feather: new THREE.MeshPhysicalMaterial({
-      vertexColors: true, roughness: 0.48, clearcoat: 0.25, clearcoatRoughness: 0.55,
-      sheen: 0.5, sheenRoughness: 0.6, sheenColor: C('#8a96a8'),
-    }),
-    foot: new THREE.MeshStandardMaterial({ color: C('#1b1c20'), roughness: 0.6 }),
-    eye: new THREE.MeshPhysicalMaterial({ color: C('#130c08'), roughness: 0.05, clearcoat: 1 }),
+  ASSET = {
+    scene, materials, joints: classified, height,
+    center: feet.getCenter(new THREE.Vector3()).setY(0),
+    neck: new THREE.Vector3(0, 0.8 * height, -0.02 * height),
+    shoulderL: new THREE.Vector3(halfWidth * 0.55, shoulderY || height * 0.72, 0),
+    shoulderR: new THREE.Vector3(-halfWidth * 0.55, shoulderY || height * 0.72, 0),
   };
-  return MAT;
+}
+
+export function setAdultQuality({ alphaToCoverage }) {
+  for (const m of ASSET.materials) {
+    if (m.name !== 'penguin_feather' || m.alphaToCoverage === alphaToCoverage) continue;
+    m.alphaToCoverage = alphaToCoverage;
+    m.needsUpdate = true;
+  }
+}
+
+const _m = new THREE.Matrix4();
+const _r = new THREE.Matrix4();
+const _t = new THREE.Matrix4();
+const _hinv = new THREE.Matrix4();
+const _e = new THREE.Euler(0, 0, 0, 'YXZ');
+const AX_Z = new THREE.Vector3(0, 0, 1);
+
+// Rotation `rot` about `pivot`, written into `out`.
+function aboutPivot(pivot, rot, out) {
+  out.makeTranslation(pivot.x, pivot.y, pivot.z);
+  out.multiply(rot);
+  return out.multiply(_t.makeTranslation(-pivot.x, -pivot.y, -pivot.z));
 }
 
 export class Adult {
   constructor(x, z, yaw, world) {
-    GEO ??= build();
-    const M = mats();
     this.world = world;
     this.root = new THREE.Group();
     this.root.position.set(x, world.heightAt(x, z), z);
     this.root.rotation.y = yaw;
-    const s = 1.04 + Math.random() * 0.1;
-    this.root.scale.setScalar(s);
+    const s = 0.95 + Math.random() * 0.1;
     this.yaw = yaw;
     this.targetYaw = yaw;
 
+    // Rocks the whole bird about its feet.
     this.pivot = new THREE.Group();
-    this.pivot.position.y = 0.03;
     this.pivot.rotation.order = 'YXZ';
     this.root.add(this.pivot);
-    const body = new THREE.Mesh(GEO.body, M.feather);
-    body.castShadow = body.receiveShadow = true;
-    this.pivot.add(body);
+    this.holder = new THREE.Group();
+    const k = (HEIGHT / ASSET.height) * s;
+    this.holder.scale.setScalar(k);
+    this.holder.position.copy(ASSET.center).multiplyScalar(-k);
+    this.pivot.add(this.holder);
+    this.model = cloneSkinned(ASSET.scene);
+    this.holder.add(this.model);
 
-    this.headPivot = new THREE.Group();
-    this.headPivot.position.set(0, 0.93, 0.0);
-    this.headPivot.rotation.order = 'YXZ';
-    this.pivot.add(this.headPivot);
-    const head = new THREE.Mesh(GEO.head, M.feather);
-    head.position.set(0, 0.06, 0.03);
-    head.castShadow = true;
-    this.headPivot.add(head);
-    const beak = new THREE.Mesh(GEO.beak, M.feather);
-    beak.position.set(0, 0.05, 0.11);
-    beak.rotation.x = 0.12;
-    beak.castShadow = true;
-    this.headPivot.add(beak);
-    for (const sx of [-1, 1]) {
-      const e = new THREE.Mesh(new THREE.SphereGeometry(0.008, 10, 8), M.eye);
-      e.position.set(sx * 0.047, 0.075, 0.075);
-      this.headPivot.add(e);
-    }
-
-    this.flippers = [];
-    for (const sx of [-1, 1]) {
-      const pv = new THREE.Group();
-      pv.position.set(sx * 0.2, 0.66, -0.01);
-      const f = new THREE.Mesh(GEO.flip, M.feather);
-      f.castShadow = true;
-      pv.add(f);
-      this.pivot.add(pv);
-      this.flippers.push({ pv, side: sx });
-    }
-    for (const sx of [-1, 1]) {
-      const f = new THREE.Mesh(GEO.foot, M.foot);
-      f.position.set(sx * 0.08, 0, 0.02);
-      f.rotation.y = sx * -0.2;
-      this.root.add(f);
-    }
+    // Unique joints across all skins, each with its classification.
+    const seen = new Map();
+    let mi = 0;
+    this.model.traverse((o) => {
+      if (!o.isSkinnedMesh) return;
+      o.skeleton.bones.forEach((bone, bi) => {
+        const j = ASSET.joints[mi][bi];
+        const prev = seen.get(bone);
+        if (!prev) seen.set(bone, { bone, ...j });
+        else if (!prev.head && !prev.flip) Object.assign(prev, j);
+      });
+      mi++;
+    });
+    this.joints = [...seen.values()].filter((j) => j.head || j.flip);
 
     this.t = Math.random() * 20;
     this.look = { yaw: 0, pitch: 0, tYaw: 0, tPitch: 0, next: 0 };
+    this.headYaw = 0;
+    this.headPitch = 0;
+    this.flipSpread = 0;
     this.callT = 0;
     this.collider = { x, z, r: 0.3 * s };
   }
@@ -214,7 +198,29 @@ export class Adult {
     const callPitch = this.callT > 1.4 ? 0.5 * c : -0.7 * c;
 
     this.pivot.rotation.set(0.02 + Math.sin(t * 0.6) * 0.02 - c * 0.08, 0, Math.sin(t * 0.9) * 0.025);
-    this.headPivot.rotation.set(lerp(L.pitch, 0, c) + callPitch, L.yaw * (1 - c), Math.sin(t * 0.5) * 0.06);
-    for (const f of this.flippers) f.pv.rotation.set(0.05, 0, f.side * (0.12 + Math.sin(t * 0.8 + f.side) * 0.03 + c * 0.1));
+    // Positive pitch lowers the head, as in the old procedural model.
+    this.headPitch = lerp(L.pitch, 0, c) + callPitch - HEAD_LIFT;
+    this.headYaw = L.yaw * (1 - c);
+    this.headRoll = Math.sin(t * 0.5) * 0.06;
+    this.flipSpread = 0.06 + Math.sin(t * 0.8) * 0.03 + c * 0.1;
+  }
+
+  // Call after scene.updateMatrixWorld(): turns the head and flipper joints
+  // away from the rest pose.
+  applyPose() {
+    const H = this.holder.matrixWorld;
+    _hinv.copy(H).invert();
+    for (const j of this.joints) {
+      if (j.head) {
+        _e.set(this.headPitch * j.head, this.headYaw * j.head, this.headRoll * j.head);
+        aboutPivot(ASSET.neck, _r.makeRotationFromEuler(_e), _m);
+      } else {
+        const pivot = j.flip > 0 ? ASSET.shoulderL : ASSET.shoulderR;
+        aboutPivot(pivot, _r.makeRotationAxis(AX_Z, this.flipSpread * j.flip), _m);
+      }
+      // Model-space rigid transform to world space: H · M · H⁻¹.
+      _m.premultiply(H).multiply(_hinv);
+      j.bone.matrixWorld.premultiply(_m);
+    }
   }
 }

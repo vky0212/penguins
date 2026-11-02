@@ -2,7 +2,7 @@
   "name": "chick-model-tools",
   "private": true,
   "type": "module",
-  "description": "Converts the source emperor chick GLB into the compressed asset the game loads.",
+  "description": "Converts the source emperor chick and adult GLBs into the compressed assets the game loads.",
   "scripts": {
     "build": "node prepare.mjs"
   },

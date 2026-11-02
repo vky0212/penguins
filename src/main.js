@@ -6,7 +6,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { World } from './world.js';
 import { Atmosphere } from './atmosphere.js';
 import { Chick, loadChickAsset, setChickQuality } from './chick.js';
-import { Adult } from './adult.js';
+import { Adult, loadAdultAsset, setAdultQuality } from './adult.js';
 import { makeBody, stepCharacter } from './physics.js';
 import { Prints } from './prints.js';
 import { SnowLayer } from './snow.js';
@@ -79,8 +79,13 @@ async function boot() {
 
   await setProgress(0.55, '載入企鵝寶寶模型…');
   await loadChickAsset(['assets/chick.glb', 'assets/chick.b64.txt'], (p) => {
-    $('load-bar').style.transform = `scaleX(${0.55 + p * 0.3})`;
+    $('load-bar').style.transform = `scaleX(${0.55 + p * 0.15})`;
     $('load-label').textContent = `載入企鵝寶寶模型… ${Math.round(p * 100)}%`;
+  });
+  await setProgress(0.7, '載入帝企鵝模型…');
+  await loadAdultAsset(['assets/adult.glb', 'assets/adult.b64.txt'], (p) => {
+    $('load-bar').style.transform = `scaleX(${0.7 + p * 0.1})`;
+    $('load-label').textContent = `載入帝企鵝模型… ${Math.round(p * 100)}%`;
   });
   const prints = new Prints(scene, world);
   const audio = new AudioFX();
@@ -177,6 +182,7 @@ async function boot() {
     renderer.setPixelRatio(Math.min(devicePixelRatio, Q.dpr));
     atmo.setShadowSize(Q.shadow);
     setChickQuality({ alphaToCoverage: Q.msaa > 0 });
+    setAdultQuality({ alphaToCoverage: Q.msaa > 0 });
     world.setTextureSize(Q.tex);
     bloom.enabled = Q.bloom;
     for (const t of [composer.renderTarget1, composer.renderTarget2]) {
@@ -464,11 +470,12 @@ async function boot() {
       $('act-slide').setAttribute('aria-pressed', String(body.mode === 'slide'));
     }
 
-    // World matrices are updated by hand so the chicks' procedural pose can be
-    // written straight into their joint matrices before rendering.
+    // World matrices are updated by hand so the penguins' procedural poses
+    // can be written straight into their joint matrices before rendering.
     scene.updateMatrixWorld();
     player.applyPose();
     for (const n of npcs) n.chick.applyPose();
+    for (const a of adults) a.applyPose();
     composer.render(dt);
     requestAnimationFrame(frame);
   }
