@@ -117,6 +117,11 @@ async function boot() {
     if (world.colliders.some((c) => Math.hypot(c.x - x, c.z - z) < c.r + 0.6)) continue;
     placed.push({ x, z });
     const ad = new Adult(x, z, Math.PI / 2 + (Math.random() - 0.5) * 1.4, world);
+    ad.onStep = (side, fx, fz) => {
+      prints.foot(fx, fz, ad.yaw, side, 1.5);
+      const d = camera.position.distanceTo(ad.root.position);
+      if (d < 10) audio.step(world.iceAt(fx, fz) > 0.4, 0.8 / (1 + d), panOf(ad.root.position));
+    };
     scene.add(ad.root);
     adults.push(ad);
   }
@@ -367,6 +372,8 @@ async function boot() {
     }
     if (best) {
       best.faceTowards(body.pos.x, body.pos.z);
+      // It answers, then waddles over if the chick is more than a step away.
+      if (bd > 1.5) best.walkTo(body.pos.x, body.pos.z, 0.8);
       setTimeout(() => {
         best.call();
         audio.adultCall(Math.min(1, 3 / (1 + camera.position.distanceTo(best.root.position))), panOf(best.root.position));
@@ -417,7 +424,7 @@ async function boot() {
       n.chick.update(dt, chickState(n.body, n.state));
       if (n.body.mode !== 'walk') prints.belly(n, n.body.pos.x, n.body.pos.z, n.body.yaw, n.chick.scale);
     }
-    for (const a of adults) a.update(dt);
+    for (const a of adults) a.update(dt, colliders);
 
     ambientCallT -= dt;
     if (ambientCallT < 0 && started) {
@@ -482,7 +489,7 @@ async function boot() {
   requestAnimationFrame(frame);
   // Test hook: advance the simulation deterministically with a fixed input.
   window.__sim = {
-    body, world, player, scene, renderer, camera, cam, atmo, weather,
+    body, world, player, adults, scene, renderer, camera, cam, atmo, weather,
     simulate(secs, mv, action) {
       forced = mv;
       if (action) pending[action] = true;
