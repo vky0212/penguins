@@ -28,7 +28,7 @@ export function makeBody(x, z, yaw, world) {
 
 const angleTo = (a, b) => Math.atan2(Math.sin(b - a), Math.cos(b - a));
 
-// inp: { x, z (world-space move dir, |v|<=1), run, hop, slide }
+// inp: { x, z (world-space move dir, |v|<=1), run, hop, slide, wind }
 export function stepCharacter(b, inp, dt, world, colliders) {
   const n = world.normalAt(b.pos.x, b.pos.z, _n);
   const ice = world.iceAt(b.pos.x, b.pos.z) > 0.5;
@@ -36,6 +36,14 @@ export function stepCharacter(b, inp, dt, world, colliders) {
   b.landed = false;
   const mag = Math.min(1, Math.hypot(inp.x, inp.z));
   let vx = b.vel.x, vz = b.vel.z;
+  if (inp.wind) {
+    // Quadratic drag on a small chick: snow grip cancels it, but a blizzard
+    // gust pushes it across glaze ice or along on its belly.
+    const rx = inp.wind.x - vx, rz = inp.wind.z - vz;
+    const k = 0.0035 * Math.hypot(rx, rz) * dt;
+    vx += rx * k;
+    vz += rz * k;
+  }
 
   if (b.mode === 'tumble') {
     b.modeT -= dt;

@@ -2,7 +2,8 @@ import * as THREE from 'three';
 
 // Wind-driven snow. Particles live in a box that wraps around the camera, so
 // a fixed buffer covers the whole world. The wind offset is integrated on the
-// CPU so gusts change speed without making the flakes jump.
+// CPU so gusts change speed without making the flakes jump. Fast flakes are
+// drawn as streaks along their screen-space motion, like a camera shutter.
 
 export class SnowLayer {
   constructor(scene, { count, box, size, opacity, ground = false }) {
@@ -27,6 +28,9 @@ export class SnowLayer {
       uColor: { value: new THREE.Color(1, 1, 1) },
       uTime: { value: 0 },
       uScale: { value: 1 },
+      uVel: { value: new THREE.Vector3() },
+      uViewport: { value: new THREE.Vector2(1, 1) },
+      uFalloff: { value: 0 },
     };
     const mat = new THREE.ShaderMaterial({
       uniforms: this.uniforms,
@@ -35,8 +39,11 @@ export class SnowLayer {
       vertexShader: /* glsl */`
         uniform vec3 uOffset; uniform vec3 uCenter; uniform vec3 uBox;
         uniform float uSize; uniform float uTime; uniform float uScale;
+        uniform vec3 uVel; uniform vec2 uViewport; uniform float uFalloff;
         attribute float aRand;
         varying float vAlpha;
+        varying vec2 vDir;
+        varying float vRatio;
         void main() {
           vec3 p = position + uOffset * (0.75 + aRand * 0.5);
           p += vec3(sin(uTime * 1.3 + aRand * 40.0), sin(uTime * 0.9 + aRand * 23.0) * 0.6, cos(uTime * 1.1 + aRand * 17.0)) * 0.22;
@@ -44,14 +51,29 @@ export class SnowLayer {
           vec4 mv = modelViewMatrix * vec4(p, 1.0);
           gl_Position = projectionMatrix * mv;
           float d = -mv.z;
-          gl_PointSize = uSize * uScale * (0.5 + aRand) / max(d, 0.1);
-          vAlpha = smoothstep(0.25, 1.0, d) * (1.0 - smoothstep(uBox.x * 0.32, uBox.x * 0.5, d));
+          float base = uSize * uScale * (0.5 + aRand) / max(d, 0.1);
+          // Screen-space motion over a short exposure gives the streak.
+          vec4 c1 = projectionMatrix * (modelViewMatrix * vec4(p + uVel * (0.75 + aRand * 0.5) * 0.04, 1.0));
+          vec2 dpx = vec2(0.0);
+          if (c1.w > 0.05 && gl_Position.w > 0.05) dpx = (c1.xy / c1.w - gl_Position.xy / gl_Position.w) * 0.5 * uViewport;
+          float len = min(length(dpx), 48.0);
+          gl_PointSize = base + len;
+          vDir = len > 1e-3 ? normalize(dpx) : vec2(1.0, 0.0);
+          vRatio = base / gl_PointSize;
+          vAlpha = smoothstep(0.25, 1.0, d) * (1.0 - smoothstep(uBox.x * 0.32, uBox.x * 0.5, d)) * mix(1.0, vRatio, 0.55);
+          // Ground drift thins out with height above the bottom of its box.
+          float hb = clamp((p.y - uCenter.y) / uBox.y + 0.5, 0.0, 1.0);
+          if (uFalloff > 0.0) vAlpha *= pow(max(1.0 - hb, 1e-4), uFalloff);
         }`,
       fragmentShader: /* glsl */`
         uniform vec3 uColor; uniform float uOpacity;
         varying float vAlpha;
+        varying vec2 vDir;
+        varying float vRatio;
         void main() {
-          float r = length(gl_PointCoord - 0.5);
+          vec2 c = gl_PointCoord - 0.5;
+          c.y = -c.y;
+          float r = length(vec2(dot(c, vDir), dot(c, vec2(-vDir.y, vDir.x)) / max(vRatio, 0.04)));
           float a = smoothstep(0.5, 0.05, r) * vAlpha * uOpacity;
           if (a < 0.01) discard;
           gl_FragColor = vec4(uColor, a);
@@ -67,8 +89,10 @@ export class SnowLayer {
     this.points.geometry.setDrawRange(0, Math.min(this.max, n));
   }
 
-  update(dt, center, wind, fall, color, pixelScale) {
+  update(dt, center, wind, fall, color, pixelScale, viewport) {
     const u = this.uniforms;
+    u.uVel.value.set(wind.x, -fall, wind.z);
+    u.uViewport.value.copy(viewport);
     u.uTime.value += dt;
     u.uOffset.value.x += wind.x * dt;
     u.uOffset.value.z += wind.z * dt;

@@ -44,6 +44,39 @@ export class Atmosphere {
     this.fogColor = new THREE.Color('#b9c8d8');
     this.skyTop = new THREE.Color();
     scene.fog = new THREE.FogExp2(this.fogColor.clone(), 0.0022);
+    this.sunBase = 3;
+    this.overcastColor = new THREE.Color();
+
+    // Cloud and blowing-snow haze over the sky dome; thickest at the horizon.
+    this.haze = new THREE.Mesh(
+      new THREE.SphereGeometry(9000, 32, 16),
+      new THREE.ShaderMaterial({
+        uniforms: { uColor: { value: new THREE.Color() }, uHaze: { value: 0 } },
+        vertexShader: /* glsl */`
+          varying vec3 vDir;
+          void main() {
+            vDir = position;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }`,
+        fragmentShader: /* glsl */`
+          uniform vec3 uColor; uniform float uHaze;
+          varying vec3 vDir;
+          void main() {
+            float y = normalize(vDir).y;
+            float a = uHaze * (1.0 - 0.3 * smoothstep(0.02, 0.7, y) * (1.0 - uHaze));
+            gl_FragColor = vec4(uColor, a);
+            #include <tonemapping_fragment>
+            #include <colorspace_fragment>
+          }`,
+        side: THREE.BackSide,
+        transparent: true,
+        depthWrite: false,
+        fog: false,
+      }),
+    );
+    this.haze.frustumCulled = false;
+    this.haze.visible = false;
+    scene.add(this.haze);
 
     const canFloat = renderer.extensions.has('EXT_color_buffer_float');
     this.sampleRT = canFloat ? new THREE.WebGLRenderTarget(8, 8, { type: THREE.FloatType }) : null;
@@ -83,7 +116,8 @@ export class Atmosphere {
     // Low sun: warm and dim, cold blue sky light in the shadows.
     const e = smooth(0, 30, elevDeg);
     this.sun.color.setRGB(1, 0.72 + 0.24 * e, 0.5 + 0.4 * e);
-    this.sun.intensity = 1.6 + 2.2 * smooth(-1, 20, elevDeg);
+    this.sunBase = 1.6 + 2.2 * smooth(-1, 20, elevDeg);
+    this.sun.intensity = this.sunBase;
     this.scene.environmentIntensity = 0.75;
 
     if (this.sampleRT) {
@@ -99,6 +133,24 @@ export class Atmosphere {
       this.fogColor.setRGB(0.55 + 0.2 * e, 0.62 + 0.2 * e, 0.75 + 0.15 * e);
     }
     this.scene.fog.color.copy(this.fogColor);
+  }
+
+  // Overcast dims the sun and softens its shadows; fog and haze go grey-white.
+  applyWeather(w, camPos) {
+    const o = w.overcast;
+    const f = this.fogColor;
+    const lum = (0.2126 * f.r + 0.7152 * f.g + 0.0722 * f.b) * (1 - 0.3 * o);
+    this.overcastColor.setRGB(lum * 0.95, lum * 0.98, lum * 1.04);
+    this.scene.fog.color.copy(f).lerp(this.overcastColor, o);
+    this.scene.fog.density = w.fog;
+    this.sun.intensity = this.sunBase * (1 - 0.85 * o);
+    this.sun.shadow.intensity = 1 - 0.7 * o;
+    this.scene.environmentIntensity = 0.75 + 0.35 * o;
+    const m = this.haze.material.uniforms;
+    m.uColor.value.copy(this.scene.fog.color);
+    m.uHaze.value = Math.min(1, o * 0.75 + w.fog * 12);
+    this.haze.visible = m.uHaze.value > 0.01;
+    this.haze.position.copy(camPos);
   }
 
   follow(target) {

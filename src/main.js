@@ -10,6 +10,7 @@ import { Adult } from './adult.js';
 import { makeBody, stepCharacter } from './physics.js';
 import { Prints } from './prints.js';
 import { SnowLayer } from './snow.js';
+import { Weather, WEATHERS } from './weather.js';
 import { FollowCamera, Input } from './controls.js';
 import { AudioFX } from './audio.js';
 
@@ -32,9 +33,10 @@ const store = {
 };
 
 const PRESETS = {
-  low: { dpr: 1, shadow: 1024, snow: 1200, drift: 500, bloom: false, msaa: 0 },
-  medium: { dpr: 1.5, shadow: 2048, snow: 2600, drift: 1000, bloom: false, msaa: 2 },
-  high: { dpr: 2, shadow: 4096, snow: 4500, drift: 1800, bloom: true, msaa: 4 },
+  // snow/drift: particle counts at full blizzard; tex: snow relief texture size.
+  low: { dpr: 1, shadow: 1024, snow: 3000, drift: 1200, bloom: false, msaa: 0, tex: 512 },
+  medium: { dpr: 1.5, shadow: 2048, snow: 7000, drift: 2600, bloom: false, msaa: 2, tex: 1024 },
+  high: { dpr: 2, shadow: 4096, snow: 14000, drift: 5000, bloom: true, msaa: 4, tex: 2048 },
 };
 let qualityName = store.get('quality', isTouch ? 'medium' : 'high');
 if (!PRESETS[qualityName]) qualityName = 'medium';
@@ -67,7 +69,7 @@ async function boot() {
   const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.03, 30000);
 
   await setProgress(0.15, '堆積雪丘與海冰…');
-  const world = new World(scene, { segments: isTouch ? 220 : 300, normalMapSize: isTouch ? 256 : 512 });
+  const world = new World(scene, renderer, { segments: isTouch ? 240 : 400, textureSize: Q.tex });
 
   await setProgress(0.45, '計算天空與低角度的極地陽光…');
   const atmo = new Atmosphere(renderer, scene);
@@ -139,7 +141,10 @@ async function boot() {
 
   await setProgress(0.92, '準備風雪…');
   const snow = new SnowLayer(scene, { count: PRESETS.high.snow, box: new THREE.Vector3(34, 14, 34), size: 0.014, opacity: 0.85 });
-  const drift = new SnowLayer(scene, { count: PRESETS.high.drift, box: new THREE.Vector3(22, 0.7, 22), size: 0.007, opacity: 0.4 });
+  const drift = new SnowLayer(scene, { count: PRESETS.high.drift, box: new THREE.Vector3(22, 2.4, 22), size: 0.007, opacity: 0.4 });
+  let weatherMode = store.get('weather', 'auto');
+  if (weatherMode !== 'auto' && !WEATHERS[weatherMode]) weatherMode = 'auto';
+  const weather = new Weather(weatherMode);
 
   // Post-processing. Everything renders to an HDR target so fog, sky and
   // bloom blend in linear light; OutputPass applies tone mapping at the end.
@@ -172,8 +177,7 @@ async function boot() {
     renderer.setPixelRatio(Math.min(devicePixelRatio, Q.dpr));
     atmo.setShadowSize(Q.shadow);
     setChickQuality({ alphaToCoverage: Q.msaa > 0 });
-    snow.setCount(Q.snow);
-    drift.setCount(Q.drift);
+    world.setTextureSize(Q.tex);
     bloom.enabled = Q.bloom;
     for (const t of [composer.renderTarget1, composer.renderTarget2]) {
       t.samples = Q.msaa;
@@ -227,6 +231,13 @@ async function boot() {
     $('btn-settings').setAttribute('aria-expanded', 'false');
   });
   document.querySelectorAll('[data-quality]').forEach((b) => b.addEventListener('click', () => applyQuality(b.dataset.quality)));
+  const syncWeather = () => document.querySelectorAll('[data-weather]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.weather === weather.mode)));
+  document.querySelectorAll('[data-weather]').forEach((b) => b.addEventListener('click', () => {
+    weather.setMode(b.dataset.weather);
+    store.set('weather', b.dataset.weather);
+    syncWeather();
+  }));
+  syncWeather();
   const sunInput = $('sun');
   const sunOut = $('sun-out');
   sunInput.value = sunElev;
@@ -291,6 +302,8 @@ async function boot() {
   const wind = new THREE.Vector3();
   const prevPos = body.pos.clone();
   const snowColor = new THREE.Color();
+  const sunTint = new THREE.Color();
+  const viewport = new THREE.Vector2();
   const center = new THREE.Vector3();
   const playerState = { pos: body.pos, vel: body.vel, wind, world };
   let forced = null;
@@ -360,27 +373,26 @@ async function boot() {
 
   function step(dt) {
     t += dt;
-    const ws = 4.5 + 2.2 * Math.sin(t * 0.13) + 1.3 * Math.sin(t * 0.41 + 1) + 0.6 * Math.sin(t * 1.3);
-    const wa = 0.18 * Math.sin(t * 0.05);
-    wind.set(Math.cos(wa) * ws, 0, Math.sin(wa) * ws);
+    weather.sampleWind(t, wind);
 
     for (const d of dyn) { d.x = d.body.pos.x; d.z = d.body.pos.z; }
 
     const mv = forced ?? (started ? input.read() : { x: 0, z: 0, run: false });
     const wasMode = body.mode;
-    stepCharacter(body, { ...mv, hop: pending.hop, slide: pending.slide }, dt, world, colliders);
+    stepCharacter(body, { ...mv, hop: pending.hop, slide: pending.slide, wind }, dt, world, colliders);
     if (pending.chirp && started) onPlayerChirp();
     pending.hop = pending.slide = pending.chirp = false;
     if (body.mode !== wasMode && body.mode === 'walk') prints.resetBelly('p');
     if (body.landed) audio.step(body.onIce, 1.2, 0);
 
     for (const n of npcs) {
-      stepCharacter(n.body, { ...npcThink(n, dt), hop: false, slide: false }, dt, world, colliders);
+      stepCharacter(n.body, { ...npcThink(n, dt), hop: false, slide: false, wind }, dt, world, colliders);
     }
   }
 
   function frame() {
     const dt = Math.min(clock.getDelta(), 0.1);
+    weather.update(dt);
     acc += dt;
     while (acc >= STEP) {
       step(STEP);
@@ -393,7 +405,7 @@ async function boot() {
     player.update(dt, chickState(body, playerState));
     if (body.mode !== 'walk' && body.grounded && body.speed > 0.05) prints.belly('p', body.pos.x, body.pos.z, body.yaw);
     audio.setSlide(body.mode === 'slide' && body.grounded ? body.speed : 0, body.onIce);
-    audio.setWind(Math.min(1, wind.length() / 9));
+    audio.setWind(Math.min(1.7, wind.length() / 9));
 
     for (const n of npcs) {
       n.chick.update(dt, chickState(n.body, n.state));
@@ -414,15 +426,25 @@ async function boot() {
     if (!started) cam.yaw += dt * 0.08;
     cam.update(dt, body, world, started);
     atmo.follow(body.pos);
+    atmo.applyWeather(weather.cur, camera.position);
 
     center.copy(camera.position);
     const pr = renderer.getPixelRatio();
     const pxScale = (innerHeight * pr) / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)));
-    snowColor.copy(atmo.fogColor).multiplyScalar(1.5).add(atmo.sun.color.clone().multiplyScalar(0.25));
-    snow.update(dt, center, wind, 0.7, snowColor, pxScale);
-    center.set(body.pos.x, body.pos.y + 0.3, body.pos.z);
-    drift.update(dt, center, wind.clone().multiplyScalar(1.8), 0, snowColor, pxScale);
-    drift.uniforms.uOpacity.value = 0.12 + 0.35 * Math.min(1, Math.max(0, (wind.length() - 3) / 5));
+    renderer.getDrawingBufferSize(viewport);
+    const W = weather.cur;
+    snowColor.copy(scene.fog.color).multiplyScalar(1.5).add(sunTint.copy(atmo.sun.color).multiplyScalar(0.25 * (1 - W.overcast)));
+    snow.setCount(Math.round(Q.snow * W.snow));
+    snow.uniforms.uOpacity.value = 0.6 + 0.3 * W.snow;
+    snow.update(dt, center, wind, 0.7, snowColor, pxScale, viewport);
+    // Blowing snow near the ground picks up above ~4 m/s and thickens with the weather.
+    const windy = Math.min(1, Math.max(0, (wind.length() - 3.5) / 6));
+    center.set(body.pos.x, body.pos.y + 0.9, body.pos.z);
+    drift.setCount(Math.round(Q.drift * (0.3 + 0.7 * W.drift)));
+    drift.uniforms.uOpacity.value = (0.12 + 0.5 * windy) * (0.55 + 0.45 * W.drift);
+    drift.uniforms.uFalloff.value = 3.5 - 2.7 * W.drift;
+    drift.update(dt, center, wind.clone().multiplyScalar(1.8), 0, snowColor, pxScale, viewport);
+    world.setDrift(windy * (0.3 + 0.7 * W.drift) * 0.75, snowColor, weather.flow0, weather.flow1, (1 - W.overcast) ** 2);
 
     hudT -= dt;
     if (hudT < 0) {
@@ -432,7 +454,7 @@ async function boot() {
       const air = -24 + sunElev * 0.25;
       const vk = Math.pow(ws * 3.6, 0.16);
       const chill = 13.12 + 0.6215 * air - 11.37 * vk + 0.3965 * air * vk;
-      ui.temp.textContent = `${Math.round(air)}°C`;
+      ui.temp.textContent = `${Math.round(air)}°C · ${weather.label}`;
       ui.wind.textContent = `${ws.toFixed(1)} m/s · 體感 ${Math.round(chill)}°C`;
       ui.surf.textContent = body.onIce ? '藍冰（很滑）' : '雪面';
       ui.surf.dataset.ice = String(body.onIce);
@@ -453,7 +475,7 @@ async function boot() {
   requestAnimationFrame(frame);
   // Test hook: advance the simulation deterministically with a fixed input.
   window.__sim = {
-    body, world, player, scene, renderer, camera, cam, atmo,
+    body, world, player, scene, renderer, camera, cam, atmo, weather,
     simulate(secs, mv, action) {
       forced = mv;
       if (action) pending[action] = true;

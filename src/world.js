@@ -71,8 +71,14 @@ function analyticIce(x, z) {
   return ice;
 }
 
-// Tileable micro-relief for the snow: sum of integer-frequency waves.
-function makeSnowNormalMap(size) {
+// Tileable micro-relief for the snow: sum of integer-frequency waves. The
+// first 70 are sastrugi and drift ripples; the rest is fine wind-crust grain,
+// kept only where the texture is large enough to resolve it. Rendered on the
+// GPU with analytic derivatives, so it can be regenerated at any resolution.
+// RGB is the tangent-space normal, A the height (used as a cavity term).
+const MAX_WAVES = 160;
+
+function snowWaves(size) {
   const waves = [];
   let seed = 7;
   const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
@@ -83,42 +89,81 @@ function makeSnowNormalMap(size) {
     const ky = sastrugi ? k * 3 + Math.floor(rnd() * 6) : Math.round((rnd() - 0.5) * 2 * k);
     if (kx === 0 && ky === 0) continue;
     const amp = (sastrugi ? 0.55 : 1.0) / Math.pow(Math.hypot(kx, ky), 1.1);
-    waves.push({ kx, ky, amp, ph: rnd() * Math.PI * 2 });
+    waves.push(new THREE.Vector4(kx, ky, amp, rnd() * Math.PI * 2));
   }
-  const H = new Float32Array(size * size);
-  for (let j = 0; j < size; j++) {
-    for (let i = 0; i < size; i++) {
-      const u = i / size, v = j / size;
-      let h = 0;
-      for (const w of waves) h += w.amp * Math.sin(2 * Math.PI * (w.kx * u + w.ky * v) + w.ph);
-      H[j * size + i] = h;
-    }
+  seed = 911;
+  while (waves.length < MAX_WAVES) {
+    const k = 40 + Math.floor(rnd() * 140);
+    const a = rnd() * Math.PI * 2;
+    // Grain is slightly stretched across the wind, like a wind crust.
+    const kx = Math.round(Math.cos(a) * k * 0.7), ky = Math.round(Math.sin(a) * k);
+    const kk = Math.hypot(kx, ky);
+    const amp = kk > 0 && kk < size / 7 ? 0.8 / Math.pow(kk, 1.15) : 0;
+    waves.push(new THREE.Vector4(kx, ky, amp, rnd() * Math.PI * 2));
   }
-  const data = new Uint8Array(size * size * 4);
-  const k = size * 0.012;
-  for (let j = 0; j < size; j++) {
-    for (let i = 0; i < size; i++) {
-      const hx = H[j * size + ((i + 1) % size)] - H[j * size + ((i - 1 + size) % size)];
-      const hy = H[((j + 1) % size) * size + i] - H[((j - 1 + size) % size) * size + i];
-      const nx = -hx * k, ny = -hy * k, nz = 1;
-      const l = Math.hypot(nx, ny, nz);
-      const o = (j * size + i) * 4;
-      data[o] = (nx / l * 0.5 + 0.5) * 255;
-      data[o + 1] = (ny / l * 0.5 + 0.5) * 255;
-      data[o + 2] = (nz / l * 0.5 + 0.5) * 255;
-      data[o + 3] = 255;
-    }
-  }
-  const tex = new THREE.DataTexture(data, size, size);
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  tex.generateMipmaps = true;
-  tex.minFilter = THREE.LinearMipmapLinearFilter;
-  tex.magFilter = THREE.LinearFilter;
-  tex.anisotropy = 8;
-  tex.needsUpdate = true;
-  return tex;
+  return waves;
 }
 
+class SnowTexture {
+  constructor(renderer) {
+    this.renderer = renderer;
+    this.rt = new THREE.WebGLRenderTarget(4, 4, {
+      generateMipmaps: true,
+      minFilter: THREE.LinearMipmapLinearFilter,
+      magFilter: THREE.LinearFilter,
+      wrapS: THREE.RepeatWrapping,
+      wrapT: THREE.RepeatWrapping,
+      anisotropy: Math.min(16, renderer.capabilities.getMaxAnisotropy()),
+      depthBuffer: false,
+    });
+    this.texture = this.rt.texture;
+    this.mat = new THREE.ShaderMaterial({
+      uniforms: { uWaves: { value: [] }, uRms: { value: 1 } },
+      vertexShader: /* glsl */`
+        varying vec2 vUv;
+        void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+      fragmentShader: /* glsl */`
+        #define TAU 6.283185307
+        uniform vec4 uWaves[${MAX_WAVES}];
+        uniform float uRms;
+        varying vec2 vUv;
+        void main() {
+          float h = 0.0;
+          vec2 d = vec2(0.0);
+          for (int i = 0; i < ${MAX_WAVES}; i++) {
+            vec4 w = uWaves[i];
+            float a = TAU * dot(w.xy, vUv) + w.w;
+            h += w.z * sin(a);
+            d += w.z * TAU * w.xy * cos(a);
+          }
+          vec3 n = normalize(vec3(-d * 0.024, 1.0));
+          gl_FragColor = vec4(n * 0.5 + 0.5, clamp(0.5 + h / (uRms * 6.0), 0.0, 1.0));
+        }`,
+      depthTest: false,
+      depthWrite: false,
+    });
+    this.quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.mat);
+    this.quad.frustumCulled = false;
+    this.cam = new THREE.OrthographicCamera();
+  }
+
+  render(size) {
+    if (size === this.size) return;
+    this.size = size;
+    const waves = snowWaves(size);
+    this.mat.uniforms.uWaves.value = waves;
+    this.mat.uniforms.uRms.value = Math.sqrt(waves.reduce((s, w) => s + w.z * w.z, 0) / 2);
+    this.rt.setSize(size, size);
+    const r = this.renderer;
+    const prev = r.getRenderTarget();
+    r.setRenderTarget(this.rt);
+    r.render(this.quad, this.cam);
+    r.setRenderTarget(prev);
+  }
+}
+
+// Wind-crust / powder variation, snow ripples at three scales (to hide the
+// texture's tiling), and blowing snow streaming over the surface.
 function makeSnowMaterial(normalMap) {
   const mat = new THREE.MeshStandardMaterial({
     color: new THREE.Color('#eef3f8'),
@@ -127,32 +172,83 @@ function makeSnowMaterial(normalMap) {
     normalMap,
     normalScale: new THREE.Vector2(0.26, 0.26),
   });
+  mat.userData.uniforms = {
+    uIceColor: { value: new THREE.Color('#8fbfe0') },
+    uFlow0: { value: new THREE.Vector3() },
+    uFlow1: { value: new THREE.Vector3() },
+    uDrift: { value: 0 },
+    uGlitter: { value: 1 },
+    uDriftColor: { value: new THREE.Color(1, 1, 1) },
+  };
   mat.onBeforeCompile = (shader) => {
-    shader.uniforms.uIceColor = { value: new THREE.Color('#8fbfe0') };
+    Object.assign(shader.uniforms, mat.userData.uniforms);
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
         attribute float aIce;
         varying float vIce;
-        varying vec3 vWorldP;`)
+        varying vec3 vWorldP;
+        varying vec3 vWorldN;`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
         vIce = aIce;
-        vWorldP = (modelMatrix * vec4(transformed, 1.0)).xyz;`);
+        vWorldP = (modelMatrix * vec4(transformed, 1.0)).xyz;
+        vWorldN = normal;`);
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>
         uniform vec3 uIceColor;
+        uniform vec3 uFlow0, uFlow1, uDriftColor;
+        uniform float uDrift, uGlitter;
         varying float vIce;
         varying vec3 vWorldP;
+        varying vec3 vWorldN;
+        float gPacked;
         float h13(vec3 p) { p = fract(p * 0.1031); p += dot(p, p.zyx + 31.32); return fract((p.x + p.y) * p.z); }
-        vec3 h33(vec3 p) { return vec3(h13(p), h13(p + 17.1), h13(p + 41.7)); }`)
+        vec3 h33(vec3 p) { return vec3(h13(p), h13(p + 17.1), h13(p + 41.7)); }
+        float vnoise(vec2 p) {
+          vec2 i = floor(p), f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          float a = h13(vec3(i, 0.0)), b = h13(vec3(i + vec2(1.0, 0.0), 0.0));
+          float c = h13(vec3(i + vec2(0.0, 1.0), 0.0)), d = h13(vec3(i + 1.0, 0.0));
+          return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+        }
+        float fbm(vec2 p) {
+          float s = 0.0, a = 0.5;
+          for (int i = 0; i < 4; i++) { s += a * vnoise(p); p = p * 2.03 + 17.1; a *= 0.5; }
+          return s;
+        }
+        // Spindrift: thin sheets of snow streaming along the wind (+x).
+        float streaks(vec2 q) {
+          float sheet = smoothstep(0.46, 0.8, fbm(q * vec2(0.08, 0.5)));
+          float fil = vnoise(q * vec2(0.5, 3.4) + 7.3);
+          return sheet * (0.3 + 0.7 * fil * fil);
+        }`)
       .replace('#include <color_fragment>', `#include <color_fragment>
         {
+          float cav = texture2D(normalMap, vNormalMapUv).a * 0.6 + texture2D(normalMap, vNormalMapUv * 0.27 + 0.37).a * 0.4;
+          // Wind-packed crust (greyer, smoother) versus fresh powder, in wind-elongated patches.
+          gPacked = smoothstep(0.42, 0.66, fbm(vWorldP.xz * vec2(0.03, 0.075) + 3.1));
+          vec3 tint = mix(vec3(0.84, 0.9, 0.98), vec3(1.0), smoothstep(0.12, 0.78, cav));
+          // Steep lee faces of drifts hold bluer, denser snow.
+          tint *= mix(vec3(1.0), vec3(0.9, 0.95, 1.0), smoothstep(0.96, 0.8, vWorldN.y));
+          diffuseColor.rgb *= tint * mix(1.02, 0.94, gPacked);
           float streak = h13(floor(vWorldP * vec3(0.6, 1.0, 2.4)));
-          vec3 ice = uIceColor * (0.85 + 0.25 * streak);
+          vec3 ice = uIceColor * (0.85 + 0.25 * streak) * (0.9 + 0.2 * fbm(vWorldP.xz * vec2(0.4, 1.2)));
           diffuseColor.rgb = mix(diffuseColor.rgb, ice, vIce);
         }`)
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
+        roughnessFactor = mix(roughnessFactor, 0.66, gPacked * 0.7);
         roughnessFactor = mix(roughnessFactor, 0.07, vIce);`)
-      .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
+      .replace('#include <normal_fragment_maps>', `
+        {
+          // Base ripples, a larger rescaled copy to break up the tiling, and
+          // fine grain close to the camera (UDN blend in tangent space).
+          vec3 nA = texture2D(normalMap, vNormalMapUv).xyz * 2.0 - 1.0;
+          vec3 nB = texture2D(normalMap, vNormalMapUv * 0.27 + 0.37).xyz * 2.0 - 1.0;
+          vec3 nC = texture2D(normalMap, vNormalMapUv * 4.3 + 0.11).xyz * 2.0 - 1.0;
+          float near = 1.0 - smoothstep(5.0, 14.0, length(vViewPosition));
+          vec2 g = nA.xy / nA.z + nB.xy / nB.z * 0.8 + nC.xy / nC.z * 0.45 * near;
+          vec3 mapN = normalize(vec3(g * normalScale * mix(1.0, 0.75, gPacked), 1.0));
+          normal = normalize(tbn * mapN);
+        }
         normal = normalize(mix(normal, nonPerturbedNormal, vIce * 0.85));`)
       .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>
         {
@@ -163,10 +259,63 @@ function makeSnowMaterial(normalMap) {
           vec3 Hh = normalize(directLight.direction + normalize(vViewPosition));
           float g = pow(max(dot(facet, Hh), 0.0), 1600.0) * step(0.93, r) * (1.0 - vIce);
           float fade = 1.0 - smoothstep(8.0, 28.0, length(vViewPosition));
-          reflectedLight.directSpecular += directLight.color * g * 45.0 * fade;
-        }`);
+          reflectedLight.directSpecular += directLight.color * g * 45.0 * fade * uGlitter;
+        }`)
+      .replace('#include <opaque_fragment>', `
+        if (uDrift > 0.001) {
+          // Two flow layers cross-fade so the pattern can reset without a pop.
+          float s = streaks(vWorldP.xz - uFlow0.xy) * uFlow0.z + streaks(vWorldP.xz - uFlow1.xy) * uFlow1.z;
+          float fade = 1.0 - smoothstep(22.0, 70.0, length(vViewPosition));
+          outgoingLight = mix(outgoingLight, uDriftColor, clamp(s * uDrift * fade, 0.0, 0.8));
+        }
+        #include <opaque_fragment>`);
   };
   return mat;
+}
+
+// Triplanar detail for ice and icebergs: the same snow relief in world space,
+// which reads as firn strata on cliffs and frost on top surfaces.
+function addIceDetail(mat, map, scale, strength) {
+  const uniforms = {
+    uDetailMap: { value: map },
+    uDetailScale: { value: scale },
+    uDetailStrength: { value: strength },
+  };
+  mat.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, uniforms);
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `#include <common>
+        varying vec3 vDetailP;
+        varying vec3 vDetailN;`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+        vDetailP = (modelMatrix * vec4(transformed, 1.0)).xyz;
+        vDetailN = normalize(mat3(modelMatrix) * objectNormal);`);
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>
+        uniform sampler2D uDetailMap;
+        uniform float uDetailScale, uDetailStrength;
+        varying vec3 vDetailP;
+        varying vec3 vDetailN;
+        vec3 gDetailW;
+        vec4 detailTap(vec2 uv) { return texture2D(uDetailMap, uv); }`)
+      .replace('#include <color_fragment>', `#include <color_fragment>
+        {
+          gDetailW = pow(abs(normalize(vDetailN)), vec3(4.0));
+          gDetailW /= gDetailW.x + gDetailW.y + gDetailW.z;
+          vec3 p = vDetailP * uDetailScale;
+          float cav = detailTap(p.zy).a * gDetailW.x + detailTap(p.xz).a * gDetailW.y + detailTap(p.xy).a * gDetailW.z;
+          diffuseColor.rgb *= mix(0.88, 1.05, cav);
+        }`)
+      .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
+        {
+          vec3 p = vDetailP * uDetailScale;
+          vec2 tx = detailTap(p.zy).xy * 2.0 - 1.0;
+          vec2 ty = detailTap(p.xz).xy * 2.0 - 1.0;
+          vec2 tz = detailTap(p.xy).xy * 2.0 - 1.0;
+          vec3 dW = vec3(0.0, tx.y, tx.x) * gDetailW.x + vec3(ty.x, 0.0, ty.y) * gDetailW.y + vec3(tz.x, tz.y, 0.0) * gDetailW.z;
+          normal = normalize(normal + (viewMatrix * vec4(dW, 0.0)).xyz * uDetailStrength);
+        }`);
+  };
 }
 
 function makeIceberg(seed, radius, height) {
@@ -231,7 +380,7 @@ function makeIceChunk(rnd) {
 }
 
 export class World {
-  constructor(scene, { segments = 256, normalMapSize = 512 } = {}) {
+  constructor(scene, renderer, { segments = 256, textureSize = 1024 } = {}) {
     this.scene = scene;
     this.colliders = [];
     this.seg = segments;
@@ -260,8 +409,9 @@ export class World {
     geo.setAttribute('aIce', new THREE.BufferAttribute(iceAttr, 1));
     geo.computeVertexNormals();
 
-    const normalMap = makeSnowNormalMap(normalMapSize);
-    this.snowMat = makeSnowMaterial(normalMap);
+    this.snowTex = new SnowTexture(renderer);
+    this.snowTex.render(textureSize);
+    this.snowMat = makeSnowMaterial(this.snowTex.texture);
     const terrain = new THREE.Mesh(geo, this.snowMat);
     terrain.receiveShadow = true;
     scene.add(terrain);
@@ -288,6 +438,8 @@ export class World {
       sheen: 0.3, sheenColor: new THREE.Color('#bfe6ff'),
     });
     this.bergMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.6 });
+    addIceDetail(this.iceMat, this.snowTex.texture, 0.55, 0.35);
+    addIceDetail(this.bergMat, this.snowTex.texture, 0.05, 0.5);
 
     this.#placeIcebergs();
     this.#placeChunks();
@@ -337,6 +489,21 @@ export class World {
         this.colliders.push({ x, z, r: radius * s * 0.82 });
       }
     }
+  }
+
+  setTextureSize(size) {
+    this.snowTex.render(size);
+  }
+
+  // Blowing snow over the surface; flow layers are (offset x, offset z, weight).
+  // Glitter needs direct sun, so it fades out under cloud.
+  setDrift(amount, color, flow0, flow1, glitter = 1) {
+    const u = this.snowMat.userData.uniforms;
+    u.uGlitter.value = glitter;
+    u.uDrift.value = amount;
+    u.uDriftColor.value.copy(color);
+    u.uFlow0.value.copy(flow0);
+    u.uFlow1.value.copy(flow1);
   }
 
   // Matches the terrain mesh triangulation exactly so feet sit on the drawn surface.

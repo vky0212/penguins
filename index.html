@@ -155,6 +155,7 @@
   .field output { font: 500 12px var(--font-data); color: var(--frost); }
   .seg { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
   .seg button { background: transparent; border: 0; padding: 9px 0; cursor: pointer; font-size: 13px; }
+  .seg.seg-4 { grid-template-columns: repeat(4, 1fr); }
   .seg button + button { border-left: 1px solid var(--line); }
   .seg button[aria-pressed="true"] { background: var(--frost); color: var(--night); font-weight: 500; }
   input[type="range"] { width: 100%; accent-color: var(--sun); margin: 0; height: 28px; }
@@ -263,6 +264,15 @@
       <button type="button" id="q-low" data-quality="low" aria-pressed="false">流暢</button>
       <button type="button" id="q-medium" data-quality="medium" aria-pressed="false">平衡</button>
       <button type="button" id="q-high" data-quality="high" aria-pressed="false">精緻</button>
+    </div>
+  </div>
+  <div class="field">
+    <span>天氣</span>
+    <div class="seg seg-4" role="group" aria-label="天氣">
+      <button type="button" data-weather="auto" aria-pressed="false">自動</button>
+      <button type="button" data-weather="clear" aria-pressed="false">晴朗</button>
+      <button type="button" data-weather="snow" aria-pressed="false">飄雪</button>
+      <button type="button" data-weather="blizzard" aria-pressed="false">暴風雪</button>
     </div>
   </div>
   <div class="field">
