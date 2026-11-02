@@ -13,7 +13,7 @@ export function makeBody(x, z, yaw, world) {
     pos: new THREE.Vector3(x, world.heightAt(x, z), z),
     vel: new THREE.Vector3(),
     yaw,
-    radius: 0.12,
+    radius: 0.14,
     grounded: true,
     mode: 'walk',
     modeT: 0,
@@ -61,7 +61,7 @@ export function stepCharacter(b, inp, dt, world, colliders) {
     vz += G * n.y * n.z * slopeK * dt;
 
     if (!lying) {
-      const maxSpd = (inp.run ? 1.45 : 0.72) * n.y;
+      const maxSpd = (inp.run ? 1.1 : 0.55) * n.y;
       const tx = inp.x * maxSpd, tz = inp.z * maxSpd;
       let ex = tx - vx, ez = tz - vz;
       const el = Math.hypot(ex, ez);

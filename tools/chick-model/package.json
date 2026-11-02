@@ -1,0 +1,16 @@
+{
+  "name": "chick-model-tools",
+  "private": true,
+  "type": "module",
+  "description": "Converts the source emperor chick GLB into the compressed asset the game loads.",
+  "scripts": {
+    "build": "node prepare.mjs"
+  },
+  "dependencies": {
+    "@gltf-transform/core": "4.1.1",
+    "@gltf-transform/extensions": "4.1.1",
+    "@gltf-transform/functions": "4.1.1",
+    "jpeg-js": "0.4.4",
+    "pngjs": "7.0.0"
+  }
+}

@@ -1,428 +1,311 @@
 import * as THREE from 'three';
-import { mergeVertices, mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { ImprovedNoise } from 'three/addons/math/ImprovedNoise.js';
-import { FurPart, paint, smooth, lerp } from './fur.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 
-// Emperor penguin chick (Aptenodytes forsteri), crèche age (~10 weeks):
-// ~60 cm tall and bottle-shaped (about 4.5 head-heights), a distinct neck,
-// even mid-grey down that is paler on the throat, long pale-grey flippers. Black crown running from the bill over
-// the back of the head and down the sides of the neck; white cheeks,
-// "goggles" around the eyes, chin and throat. Small dark-brown eyes, slender
-// slightly hooked all-black bill, dark grey scaly feet with strong claws.
+// Emperor penguin chick (Aptenodytes forsteri), crèche age, ~62 cm tall.
+// Rigged model with fur cards (assets/chick.glb, built by tools/chick-model).
+// Its clips drive standing, walking and calling. Lying on the belly,
+// tobogganing and tumbling are layered on procedurally:
+//  - the whole model pitches forward onto its belly around its middle;
+//  - the head and neck lift so the chick looks ahead while lying;
+//  - the flippers spread for balance.
+// The model's skeletons are partly flattened (many joints hang straight off
+// the root), so joints can't be posed through the hierarchy. Instead each
+// joint is classified by where the vertices it moves sit (head, flippers),
+// and those joints get a rigid world-space rotation after the animation.
 
-const C = (hex) => new THREE.Color(hex);
-const PAL = {
-  greyBack: C('#6b6d70'),
-  greyBelly: C('#7e8083'),
-  greyLow: C('#6c6e71'),
-  stain: C('#8a857e'),
-  throat: C('#c9cac9'),
-  hood: C('#2c2d31'),
-  black: C('#0f0f11'),
-  white: C('#f3f3ef'),
-  flipper: C('#97999c'),
+const HEIGHT = 0.62;
+const WALK_STRIDE_SPEED = 0.275; // m/s covered by the walk_A1 cycle at timeScale 1
+const CLIP = { idle: 'idle_A1', idleFlap: 'idle_A2', callA: 'idle_B1', callB: 'idle_B2', walk: 'walk_A1' };
+
+let ASSET = null;
+
+const smooth = (e0, e1, x) => {
+  const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
+  return t * t * (3 - 2 * t);
 };
+const lerp = (a, b, t) => a + (b - a) * t;
 
-const HEAD_R = 0.08;
-const HEAD_SCALE = new THREE.Vector3(1, 0.95, 1.1);
-const EYE_DIR = new THREE.Vector3(0.6, 0.2, 0.77).normalize();
-const EYE_DIR_L = EYE_DIR.clone().multiply(new THREE.Vector3(-1, 1, 1));
-const perlin = new ImprovedNoise();
-
-let GEO = null;
-
-function cleanSmooth(g) {
-  g.deleteAttribute('uv');
-  g.deleteAttribute('normal');
-  g = mergeVertices(g, 1e-5);
-  g.computeVertexNormals();
-  return g;
-}
-
-// Head shape: flatter crown, fuller cheeks, the face drawn forward into the bill.
-function deformHead(v) {
-  const q = v.clone().divideScalar(HEAD_R);
-  if (q.y > 0) v.y *= 1 - 0.07 * q.y;
-  v.x *= 1 + 0.07 * smooth(0.1, -0.45, q.y) * smooth(-0.3, 0.4, q.z);
-  const muzzle = Math.exp(-((q.x / 0.38) ** 2) - (((q.y + 0.12) / 0.32) ** 2)) * smooth(0.25, 0.9, q.z);
-  v.z += 0.14 * HEAD_R * muzzle;
-  v.y -= 0.04 * HEAD_R * muzzle;
-  return v.multiply(HEAD_SCALE);
-}
-
-function buildGeometry() {
-  // Body: tall bottle shape, widest in the lower third, tapering into a neck.
-  const prof = [[0.0, 0.0], [0.07, 0.004], [0.1, 0.024], [0.112, 0.06], [0.116, 0.11], [0.113, 0.17],
-    [0.106, 0.23], [0.096, 0.29], [0.084, 0.34], [0.072, 0.385], [0.064, 0.42], [0.06, 0.45], [0.05, 0.476], [0.0, 0.49]];
-  const pts = new THREE.SplineCurve(prof.map(([r, y]) => new THREE.Vector2(r, y))).getPoints(64);
-  pts[0].x = 0.0001;
-  pts[pts.length - 1].x = 0.0001;
-  let body = new THREE.LatheGeometry(pts, 72);
-  const bp = body.attributes.position;
-  for (let i = 0; i < bp.count; i++) {
-    const y = bp.getY(i), z = bp.getZ(i);
-    bp.setZ(i, z * (z > 0 ? 1 + 0.08 * smooth(0.04, 0.14, y) * (1 - smooth(0.26, 0.4, y)) : 0.97));
-  }
-  body = cleanSmooth(body);
-  paint(body, (p, n, o) => {
-    const j = perlin.noise(p.x * 40, p.y * 40, p.z * 40) * 0.08;
-    const front = smooth(-0.35, 0.65, n.z + j);
-    o.color.copy(PAL.greyBack).lerp(PAL.greyBelly, front * 0.9);
-    o.color.lerp(PAL.greyLow, smooth(0.08, 0.0, p.y) * 0.6);
-    o.color.lerp(PAL.stain, smooth(0.09, 0.02, p.y) * front * 0.35);
-    // White chin/throat continues onto the upper breast.
-    o.color.lerp(PAL.throat, smooth(0.33, 0.43, p.y + j * 0.2) * smooth(-0.1, 0.6, n.z + j) * 0.85);
-    // Black hood edge on the back and sides of the neck.
-    o.color.lerp(PAL.hood, smooth(0.41, 0.46, p.y + j * 0.2) * smooth(0.1, -0.4, n.z + j) * 0.8);
-    o.fur = 1 - 0.45 * smooth(0.05, 0.0, p.y) - 0.5 * smooth(0.46, 0.49, p.y);
+export async function loadChickAsset(url, onProgress) {
+  const loader = new GLTFLoader();
+  // Decode embedded textures through <img> rather than fetch()+ImageBitmap,
+  // so blob: image URLs work under strict content security policies.
+  loader.register((parser) => {
+    parser.textureLoader = new THREE.TextureLoader(parser.options.manager);
+    parser.textureLoader.setCrossOrigin('anonymous');
+    return { name: 'img-textures' };
   });
-
-  let head = new THREE.SphereGeometry(HEAD_R, 64, 44);
-  head = cleanSmooth(head);
-  const hp = head.attributes.position;
-  const v = new THREE.Vector3();
-  for (let i = 0; i < hp.count; i++) {
-    deformHead(v.fromBufferAttribute(hp, i));
-    hp.setXYZ(i, v.x, v.y, v.z);
-  }
-  head.computeVertexNormals();
-  const q = new THREE.Vector3();
-  paint(head, (p, n, o) => {
-    q.copy(p).divide(HEAD_SCALE).normalize();
-    // Feathery, irregular boundaries between black and white.
-    const j = perlin.noise(p.x * 95, p.y * 95, p.z * 95) * 0.05 + perlin.noise(p.x * 30, p.y * 30, p.z * 30) * 0.03;
-    const ax = Math.abs(q.x) + j;
-    const y = q.y + j * 0.8;
-    const eye = Math.max(q.dot(EYE_DIR), q.dot(EYE_DIR_L));
-    // The upper edge of the white rises around each eye ("goggles").
-    const top = 0.15 + 0.15 * smooth(0.8, 0.97, eye);
-    const goggles = smooth(0.09, 0.16, ax) * smooth(-0.22, 0.0, q.z + j) * (1 - smooth(top - 0.05, top + 0.04, y));
-    const chin = smooth(-0.26, -0.4, y) * smooth(-0.28, 0.12, q.z + j);
-    // A little black at the chin, right under the bill.
-    const chinDark = smooth(0.7, 0.88, q.z) * smooth(-0.1, -0.18, y) * (1 - smooth(-0.3, -0.4, y)) * (1 - smooth(0.08, 0.18, ax));
-    const white = Math.max(goggles, chin) * (1 - chinDark);
-    o.color.copy(PAL.black).lerp(PAL.white, white);
-    // Bare dark skin ring right around the eye.
-    o.color.lerp(PAL.black, smooth(0.975, 0.99, eye));
-    const bill = smooth(0.84, 0.95, q.z) * (1 - smooth(0.16, 0.32, Math.abs(q.y + 0.12))) * (1 - smooth(0.2, 0.35, Math.abs(q.x)));
-    o.fur = (1 - smooth(0.93, 0.985, eye)) * (1 - bill * 0.9) * (0.8 + 0.2 * white);
+  const gltf = await loader.loadAsync(url, (e) => {
+    if (e.total) onProgress?.(e.loaded / e.total);
   });
-
-  // Flipper: thin, tapered and swept back toward the tip.
-  let flip = new THREE.SphereGeometry(1, 28, 18);
-  flip = cleanSmooth(flip);
-  flip.scale(0.012, 0.118, 0.034);
-  flip.translate(0, -0.105, 0);
-  const fp = flip.attributes.position;
-  for (let i = 0; i < fp.count; i++) {
-    const t = Math.min(1, Math.max(0, -fp.getY(i) / 0.22));
-    fp.setZ(i, fp.getZ(i) * (1 - 0.45 * t) - 0.018 * t * t);
-    fp.setX(i, fp.getX(i) * (1 - 0.35 * t));
+  const scene = gltf.scene;
+  const clips = {};
+  for (const [key, name] of Object.entries(CLIP)) {
+    clips[key] = gltf.animations.find((a) => a.name.endsWith(name));
   }
-  flip.computeVertexNormals();
-  paint(flip, (p, n, o) => {
-    // Pale grey, whitish along the leading edge.
-    o.color.copy(PAL.flipper).lerp(PAL.white, smooth(0.6, 0.95, n.z) * 0.5);
-    o.fur = 0.65;
-  });
 
-  // Foot: heel pad, three thick toes with webbing between them, long claws.
-  const parts = [];
-  const heel = new THREE.SphereGeometry(0.027, 16, 10);
-  heel.scale(1, 0.42, 1.25);
-  parts.push(heel);
-  const TOES = [-0.45, 0, 0.45];
-  for (const a of TOES) {
-    const toe = new THREE.CapsuleGeometry(0.0105, 0.05, 4, 12);
-    toe.rotateX(Math.PI / 2);
-    toe.scale(1, 0.72, 1);
-    toe.translate(0, -0.002, 0.036);
-    // Knuckle bumps.
-    const tp = toe.attributes.position;
-    for (let i = 0; i < tp.count; i++) {
-      const z = tp.getZ(i);
-      const k = 1 + 0.08 * Math.max(0, Math.cos((z - 0.02) * 190));
-      tp.setX(i, tp.getX(i) * k);
-      tp.setY(i, tp.getY(i) * k);
+  const materials = new Set();
+  scene.traverse((o) => {
+    if (!o.isMesh) return;
+    o.castShadow = true;
+    o.receiveShadow = true;
+    o.frustumCulled = false;
+    materials.add(o.material);
+    // The baked fur colours read dark under the low polar sun; lift them
+    // toward the mid-grey of real chicks.
+    if (o.material.name === 'feather') {
+      o.material.alphaTest = 0.5;
+      o.material.roughness = 0.92;
+      o.material.color.setScalar(1.55);
     }
-    toe.rotateY(a);
-    parts.push(toe);
-    const claw = new THREE.ConeGeometry(0.0055, 0.02, 10);
-    claw.rotateX(Math.PI / 2 + 0.35);
-    claw.translate(0, -0.005, 0.074);
-    claw.rotateY(a);
-    parts.push(claw);
-  }
-  const web = new THREE.Shape();
-  const tip = (a, r) => [Math.sin(a) * r, Math.cos(a) * r];
-  web.moveTo(...tip(TOES[0], 0.012));
-  web.lineTo(...tip(TOES[0], 0.05));
-  web.quadraticCurveTo(...tip((TOES[0] + TOES[1]) / 2, 0.034), ...tip(TOES[1], 0.052));
-  web.quadraticCurveTo(...tip((TOES[1] + TOES[2]) / 2, 0.034), ...tip(TOES[2], 0.05));
-  web.lineTo(...tip(TOES[2], 0.012));
-  web.lineTo(...tip(TOES[0], 0.012));
-  const webG = new THREE.ShapeGeometry(web, 6);
-  webG.rotateX(Math.PI / 2);
-  webG.translate(0, -0.003, 0);
-  parts.push(webG);
-  const foot = mergeGeometries(parts.map((g) => g.index ? g.toNonIndexed() : g));
-  foot.computeVertexNormals();
+    if (o.material.name === 'body') o.material.color.setScalar(1.25);
+  });
 
-  // Bill: slender, ridged along the top (culmen), hooked at the tip.
-  const upper = new THREE.ConeGeometry(0.0118, 0.045, 28, 8);
-  upper.rotateX(Math.PI / 2);
-  upper.translate(0, 0, 0.0225);
-  upper.scale(0.76, 0.72, 1);
-  const up = upper.attributes.position;
-  for (let i = 0; i < up.count; i++) {
-    const x = up.getX(i), y = up.getY(i), z = up.getZ(i);
-    const ridge = y > 0 ? 0.002 * Math.max(0, 1 - Math.abs(x) / 0.008) * (1 - z / 0.045) : 0;
-    up.setY(i, y + ridge - 4 * z * z);
+  // Pose the template once and classify every joint by the vertices it moves.
+  const mixer = new THREE.AnimationMixer(scene);
+  mixer.clipAction(clips.idle).play();
+  mixer.update(0);
+  scene.updateMatrixWorld(true);
+  const box = new THREE.Box3();
+  const v = new THREE.Vector3();
+  const joints = []; // per skinned mesh, in traversal order
+  let headBone = null;
+  scene.traverse((o) => {
+    if (!o.isSkinnedMesh) return;
+    const geo = o.geometry;
+    const si = geo.attributes.skinIndex, sw = geo.attributes.skinWeight;
+    const n = geo.attributes.position.count;
+    const step = n > 20000 ? 5 : 1;
+    const sums = o.skeleton.bones.map(() => [0, 0, 0, 0]);
+    for (let i = 0; i < n; i += step) {
+      o.getVertexPosition(i, v).applyMatrix4(o.matrixWorld);
+      box.expandByPoint(v);
+      for (let k = 0; k < 4; k++) {
+        const w = sw.getComponent(i, k);
+        if (w <= 0) continue;
+        const s = sums[si.getComponent(i, k)];
+        s[0] += v.x * w;
+        s[1] += v.y * w;
+        s[2] += v.z * w;
+        s[3] += w;
+      }
+    }
+    headBone ??= o.skeleton.bones.find((b) => b.name === 'Head_0117');
+    joints.push(sums.map((s, index) => ({ index, c: s[3] > 0 ? [s[0] / s[3], s[1] / s[3], s[2] / s[3]] : null, head: 0, flip: 0 })));
+  });
+  const height = box.max.y - Math.min(0, box.min.y);
+  const headPos = headBone.getWorldPosition(new THREE.Vector3());
+  // Model units: y up, +z forward, the chick's left at +x.
+  const neckY = headPos.y - height * 0.12;
+  const halfWidth = Math.max(-box.min.x, box.max.x);
+  let shoulderY = 0;
+  for (const list of joints) {
+    for (const j of list) {
+      if (!j.c) continue;
+      j.head = smooth(neckY - height * 0.05, neckY + height * 0.06, j.c[1]);
+      j.flip = Math.sign(j.c[0]) * smooth(halfWidth * 0.55, halfWidth * 0.72, Math.abs(j.c[0])) * (1 - j.head);
+      if (j.flip) shoulderY = Math.max(shoulderY, j.c[1]);
+    }
   }
-  upper.computeVertexNormals();
-  const lower = new THREE.ConeGeometry(0.009, 0.038, 24, 6);
-  lower.rotateX(Math.PI / 2);
-  lower.translate(0, 0, 0.019);
-  lower.scale(0.72, 0.45, 1);
-  const lp = lower.attributes.position;
-  for (let i = 0; i < lp.count; i++) lp.setY(i, lp.getY(i) - 1.6 * lp.getZ(i) ** 2);
-  lower.computeVertexNormals();
+  mixer.stopAllAction();
+  mixer.uncacheRoot(scene);
 
-  // Where the bill meets the face, and where the eyes sit on the surface.
-  let billBase = 0;
-  for (let i = 0; i < hp.count; i++) {
-    if (Math.abs(hp.getX(i)) < 0.009 && Math.abs(hp.getY(i) + 0.012) < 0.009) billBase = Math.max(billBase, hp.getZ(i));
-  }
-  const eyePos = deformHead(EYE_DIR.clone().multiplyScalar(HEAD_R)).multiplyScalar(0.975);
-
-  return {
-    body, head, flip, foot, upper, lower,
-    eye: new THREE.SphereGeometry(0.0062, 20, 14),
-    lid: new THREE.SphereGeometry(0.007, 20, 10, 0, Math.PI * 2, 0, Math.PI / 2),
-    ring: new THREE.TorusGeometry(0.0064, 0.0012, 8, 28),
-    billBase: billBase - 0.003,
-    eyePos,
+  ASSET = {
+    scene, clips, materials, joints, height,
+    neck: new THREE.Vector3(0, neckY, headPos.z - height * 0.05),
+    shoulderL: new THREE.Vector3(halfWidth * 0.55, shoulderY || height * 0.7, 0),
+    shoulderR: new THREE.Vector3(-halfWidth * 0.55, shoulderY || height * 0.7, 0),
   };
 }
 
-const footMat = new THREE.MeshStandardMaterial({ color: C('#2b2c31'), roughness: 0.62, side: THREE.DoubleSide });
-const beakMat = new THREE.MeshPhysicalMaterial({ color: C('#0d0d0f'), roughness: 0.3, clearcoat: 0.6, clearcoatRoughness: 0.25 });
-const eyeMat = new THREE.MeshPhysicalMaterial({ color: C('#1d120b'), roughness: 0.05, clearcoat: 1, clearcoatRoughness: 0.02 });
-const ringMat = new THREE.MeshStandardMaterial({ color: C('#151517'), roughness: 0.5 });
-const lidMat = new THREE.MeshStandardMaterial({ color: C('#2e2f33'), roughness: 0.8 });
+export function setChickQuality({ alphaToCoverage }) {
+  for (const m of ASSET.materials) {
+    if (m.name !== 'feather' || m.alphaToCoverage === alphaToCoverage) continue;
+    m.alphaToCoverage = alphaToCoverage;
+    m.needsUpdate = true;
+  }
+}
 
-const _q = new THREE.Quaternion();
+const _m = new THREE.Matrix4();
+const _r = new THREE.Matrix4();
+const _t = new THREE.Matrix4();
+const _hinv = new THREE.Matrix4();
 const _v = new THREE.Vector3();
-const _acc = new THREE.Vector3();
-const Z = new THREE.Vector3(0, 0, 1);
+const AX_X = new THREE.Vector3(1, 0, 0);
+const AX_Z = new THREE.Vector3(0, 0, 1);
+
+// Rotation by `angle` about `axis` through `pivot`, written into `out`.
+function pivotRotation(pivot, axis, angle, out) {
+  out.makeTranslation(pivot.x, pivot.y, pivot.z);
+  out.multiply(_r.makeRotationAxis(axis, angle));
+  return out.multiply(_t.makeTranslation(-pivot.x, -pivot.y, -pivot.z));
+}
 
 export class Chick {
-  constructor({ shells = 16, scale = 1 } = {}) {
-    GEO ??= buildGeometry();
-    this.root = new THREE.Group();
-    this.root.scale.setScalar(scale);
+  constructor({ scale = 1 } = {}) {
     this.scale = scale;
+    this.root = new THREE.Group();
+    this.tilt = new THREE.Group();
+    this.root.add(this.tilt);
+    this.holder = new THREE.Group();
+    this.holder.scale.setScalar((HEIGHT / ASSET.height) * scale);
+    this.tilt.add(this.holder);
+    this.model = cloneSkinned(ASSET.scene);
+    this.holder.add(this.model);
 
-    this.pivot = new THREE.Group();
-    this.pivot.rotation.order = 'YXZ';
-    this.root.add(this.pivot);
-    this.breath = new THREE.Group();
-    this.pivot.add(this.breath);
-
-    this.body = new FurPart(GEO.body, { length: 0.038, density: 320, maxShells: 32, tip: 1.06, comb: 0.4, tuft: 0.27, snow: 0.3 });
-    this.body.position.y = -0.14;
-    this.breath.add(this.body);
-
-    this.headPivot = new THREE.Group();
-    this.headPivot.position.set(0, 0.3, 0.008);
-    this.headPivot.rotation.order = 'YXZ';
-    this.breath.add(this.headPivot);
-    const headGroup = new THREE.Group();
-    headGroup.position.set(0, 0.062, 0.014);
-    this.headPivot.add(headGroup);
-    this.head = new FurPart(GEO.head, { length: 0.017, density: 480, maxShells: 32, tip: 1.0, comb: 0.45, tuft: 0.34, snow: 0.1, rootColor: 0.75 });
-    headGroup.add(this.head);
-
-    this.eyes = [];
-    this.lids = [];
-    for (const sx of [-1, 1]) {
-      const dir = EYE_DIR.clone().multiply(new THREE.Vector3(sx, 1, 1));
-      const pos = GEO.eyePos.clone().multiply(new THREE.Vector3(sx, 1, 1));
-      const e = new THREE.Mesh(GEO.eye, eyeMat);
-      e.position.copy(pos);
-      headGroup.add(e);
-      this.eyes.push(e);
-      const ring = new THREE.Mesh(GEO.ring, ringMat);
-      ring.position.copy(pos).addScaledVector(dir, 0.0025);
-      ring.quaternion.setFromUnitVectors(Z, dir);
-      headGroup.add(ring);
-      const lid = new THREE.Mesh(GEO.lid, lidMat);
-      lid.position.copy(pos);
-      lid.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
-      lid.visible = false;
-      headGroup.add(lid);
-      this.lids.push(lid);
-    }
-    const beakBase = new THREE.Vector3(0, -0.012, GEO.billBase);
-    this.beakUpper = new THREE.Mesh(GEO.upper, beakMat);
-    this.beakUpper.position.copy(beakBase);
-    this.beakUpper.rotation.x = 0.14;
-    this.beakUpper.castShadow = true;
-    headGroup.add(this.beakUpper);
-    this.beakLower = new THREE.Mesh(GEO.lower, beakMat);
-    this.beakLower.position.copy(beakBase).add(new THREE.Vector3(0, -0.006, -0.003));
-    this.beakLower.rotation.x = 0.17;
-    headGroup.add(this.beakLower);
-
-    this.flippers = [];
-    for (const sx of [-1, 1]) {
-      const pv = new THREE.Group();
-      pv.position.set(sx * 0.088, 0.19, -0.004);
-      const f = new FurPart(GEO.flip, { length: 0.011, density: 380, maxShells: 16, tip: 1.1, comb: 0.6, tuft: 0.35, snow: 0.2 });
-      pv.add(f);
-      this.breath.add(pv);
-      this.flippers.push({ pv, part: f, side: sx });
+    this.skins = [];
+    this.model.traverse((o) => { if (o.isSkinnedMesh) this.skins.push(o); });
+    this.toes = { L: [], R: [] };
+    for (const s of this.skins) {
+      for (const b of s.skeleton.bones) {
+        if (/^LegToeL/.test(b.name)) this.toes.L.push(b);
+        if (/^LegToeR/.test(b.name)) this.toes.R.push(b);
+      }
     }
 
-    this.feet = [];
-    for (const sx of [-1, 1]) {
-      const m = new THREE.Mesh(GEO.foot, footMat);
-      m.castShadow = true;
-      m.receiveShadow = true;
-      this.root.add(m);
-      this.feet.push({ mesh: m, side: sx, prevSin: 0 });
+    this.mixer = new THREE.AnimationMixer(this.model);
+    const act = (clip) => {
+      const a = this.mixer.clipAction(clip);
+      a.play();
+      a.setEffectiveWeight(0);
+      return a;
+    };
+    this.actions = {
+      idle: act(ASSET.clips.idle),
+      idleFlap: act(ASSET.clips.idleFlap),
+      walk: act(ASSET.clips.walk),
+      callA: act(ASSET.clips.callA),
+      callB: act(ASSET.clips.callB),
+    };
+    for (const k of ['callA', 'callB']) {
+      this.actions[k].setLoop(THREE.LoopOnce, 1);
+      this.actions[k].clampWhenFinished = true;
     }
-
-    this.parts = [this.body, this.head, ...this.flippers.map((f) => f.part)];
-    this.setShells(shells);
+    this.actions.idle.time = Math.random() * ASSET.clips.idle.duration;
+    this.actions.walk.time = Math.random() * ASSET.clips.walk.duration;
 
     this.time = Math.random() * 10;
-    this.phase = 0;
     this.walkW = 0;
     this.slideW = 0;
     this.airW = 0;
-    this.chirpT = 0;
-    this.look = { yaw: 0, pitch: 0, tYaw: 0, tPitch: 0, next: 0 };
-    this.blinkT = 2 + Math.random() * 3;
-    this.prevVel = new THREE.Vector3();
-    this.accS = new THREE.Vector3();
-    this.disp = new THREE.Vector3();
+    this.flapMix = 0;
+    this.flapTarget = 0;
+    this.nextIdleSwitch = 6 + Math.random() * 8;
+    this.call = null;
+    this.callT = 0;
+    this.mixAcc = 0;
+    this.feet = { L: { down: true }, R: { down: true } };
     this.onStep = null;
-  }
-
-  setShells(n) {
-    this.body.setShells(n);
-    this.head.setShells(n);
-    for (const f of this.flippers) f.part.setShells(Math.ceil(n / 2));
-
+    this.headLift = 0;
+    this.flipSpread = 0;
+    this.tumbleRoll = 0;
   }
 
   chirp() {
-    this.chirpT = 1.1;
+    const a = Math.random() < 0.5 ? this.actions.callA : this.actions.callB;
+    this.call = a;
+    this.callT = a.getClip().duration;
+    a.reset();
+    a.play();
   }
 
-  // st: { pos, yaw, vel, speed, grounded, mode, pushing, slopeF, wind, world }
+  // st: { pos, yaw, vel, speed, grounded, mode, pushing, slopeF, world, camDist }
   update(dt, st) {
     const t = (this.time += dt);
-    const sp = st.speed;
-    const walking = st.mode === 'walk' && st.grounded;
-    this.walkW += ((walking ? Math.min(1, sp / 0.22) : 0) - this.walkW) * Math.min(1, dt * 8);
-    const freq = 1.5 + 2.3 * Math.min(sp, 1.6);
-    if (walking && sp > 0.02) this.phase += dt * freq;
-    const w = this.walkW;
-    const ph = this.phase * Math.PI * 2;
-
     const lying = st.mode === 'slide' || st.mode === 'tumble';
-    this.slideW += ((lying ? 1 : 0) - this.slideW) * Math.min(1, dt * (st.mode === 'tumble' ? 10 : 5));
-    const s = this.slideW;
-    this.airW += ((st.grounded ? 0 : 1) - this.airW) * Math.min(1, dt * 12);
-    const air = this.airW;
+    const walking = st.mode === 'walk' && st.grounded;
 
-    this.chirpT = Math.max(0, this.chirpT - dt);
-    const c = this.chirpT > 0 ? Math.sin(Math.PI * (1 - this.chirpT / 1.1)) : 0;
+    this.walkW += ((walking ? smooth(0.04, 0.2, st.speed) : 0) - this.walkW) * Math.min(1, dt * 6);
+    this.slideW += ((lying ? 1 : 0) - this.slideW) * Math.min(1, dt * (st.mode === 'tumble' ? 9 : 4));
+    this.airW += ((st.grounded ? 0 : 1) - this.airW) * Math.min(1, dt * 10);
+    const s = this.slideW;
+
+    // Calling: one-shot clip with a short fade in and out.
+    let callW = 0;
+    if (this.call) {
+      this.callT = Math.max(0, this.callT - dt);
+      const elapsed = this.call.getClip().duration - this.callT;
+      callW = smooth(0, 0.25, elapsed) * smooth(0, 0.35, this.callT);
+      if (this.callT === 0) this.call = null;
+    }
+
+    // Idle variety: mostly looking around, now and then a flapping stretch.
+    if (t > this.nextIdleSwitch) {
+      this.flapTarget = this.flapTarget ? 0 : (Math.random() < 0.35 ? 1 : 0);
+      this.nextIdleSwitch = t + (this.flapTarget ? 4.6 : 7 + Math.random() * 9);
+    }
+    this.flapMix += (this.flapTarget - this.flapMix) * Math.min(1, dt * 2);
+
+    // Lying down: paddle with the feet (walk cycle) while pushing, else rest.
+    const paddle = lying && st.pushing ? 1 : 0;
+    const walkWeight = Math.max(this.walkW * (1 - s), paddle * s);
+    const rest = (1 - walkWeight) * (1 - callW);
+    const A = this.actions;
+    A.walk.setEffectiveWeight(walkWeight * (1 - callW));
+    A.idle.setEffectiveWeight(rest * (1 - this.flapMix * (1 - s)));
+    A.idleFlap.setEffectiveWeight(rest * this.flapMix * (1 - s));
+    A.callA.setEffectiveWeight(this.call === A.callA ? callW : 0);
+    A.callB.setEffectiveWeight(this.call === A.callB ? callW : 0);
+    A.walk.timeScale = lying ? 2.4 : THREE.MathUtils.clamp(st.speed / (WALK_STRIDE_SPEED * this.scale), 0.6, 3.4);
+
+    // Distant chicks animate at a lower rate.
+    this.mixAcc += dt;
+    if (this.mixAcc >= ((st.camDist ?? 0) > 18 ? 0.1 : 0)) {
+      this.mixer.update(this.mixAcc);
+      this.mixAcc = 0;
+    }
 
     this.root.position.copy(st.pos);
     this.root.rotation.y = st.yaw;
 
-    // Waddle: lean over the stance foot, small vertical bob.
-    const roll = Math.sin(ph) * 0.15 * w;
-    const bob = Math.abs(Math.cos(ph)) * 0.012 * w;
-    const tumbleRoll = st.mode === 'tumble' ? Math.sin(t * 7) * 0.25 : 0;
-    this.pivot.position.set(Math.sin(ph) * 0.011 * w * (1 - s), lerp(0.17 + bob, 0.125, s) + air * 0.01, lerp(0, -0.04, s));
-    this.pivot.rotation.set(
-      lerp(st.slopeF * 0.35 + 0.05 * w + 0.06 * Math.min(sp, 1.5), 1.38, s) - air * 0.08,
-      Math.sin(ph) * 0.07 * w,
-      roll * (1 - s) + tumbleRoll * s,
-    );
-    const br = Math.sin(t * 2.4);
-    this.breath.scale.set(1 + br * 0.008, 1 + br * 0.005, 1 + br * 0.01);
+    // Belly pose: pitch forward around the middle until the belly meets the snow.
+    const mid = HEIGHT * this.scale * 0.45;
+    const bellyH = HEIGHT * this.scale * 0.2;
+    this.tumbleRoll = st.mode === 'tumble' ? Math.sin(t * 7) * 0.3 : this.tumbleRoll * Math.max(0, 1 - dt * 4);
+    this.tilt.position.y = lerp(mid, bellyH, s) + this.airW * 0.01;
+    this.tilt.rotation.set(lerp(THREE.MathUtils.clamp(st.slopeF * 0.3, -0.15, 0.15), 1.42, s), 0, this.tumbleRoll * s);
+    this.holder.position.y = -mid;
 
-    // Head: idle look-around, counter-roll while walking, lift when lying.
-    const L = this.look;
-    if (t > L.next) {
-      L.tYaw = (Math.random() - 0.5) * 1.6 * (1 - w * 0.7);
-      L.tPitch = (Math.random() - 0.6) * 0.45;
-      L.next = t + 1.2 + Math.random() * 3.2;
+    this.headLift = s * 1.05;
+    this.flipSpread = s * 0.9 + this.airW * 0.5 + (st.mode === 'tumble' ? Math.sin(t * 16) * 0.4 : 0);
+
+    // Footfalls: a foot lands when its lowest toe comes down to the ground.
+    if (walking && this.walkW > 0.3) {
+      this.root.updateMatrixWorld(true);
+      for (const side of ['L', 'R']) {
+        let low = Infinity, lx = 0, lz = 0;
+        for (const b of this.toes[side]) {
+          b.getWorldPosition(_v);
+          if (_v.y < low) { low = _v.y; lx = _v.x; lz = _v.z; }
+        }
+        const h = low - st.pos.y;
+        const f = this.feet[side];
+        if (!f.down && h < 0.012 * this.scale) {
+          f.down = true;
+          this.onStep?.(side === 'L' ? -1 : 1, lx, lz);
+        } else if (f.down && h > 0.025 * this.scale) {
+          f.down = false;
+        }
+      }
     }
-    L.yaw += (L.tYaw - L.yaw) * Math.min(1, dt * 3);
-    L.pitch += (L.tPitch - L.pitch) * Math.min(1, dt * 3);
-    this.headPivot.rotation.set(
-      lerp(L.pitch * (1 - w * 0.6) - 0.05 * w, -1.05, s) - 0.55 * c,
-      L.yaw * (1 - s) * (1 - c * 0.8),
-      -roll * 0.55 + Math.sin(t * 0.7) * 0.05 * (1 - w),
-    );
-    this.beakLower.rotation.x = 0.16 + c * (0.32 + 0.12 * Math.sin(t * 34));
+  }
 
-    // Blink.
-    this.blinkT -= dt;
-    const blink = this.blinkT < 0.12 ? 0.12 : 1;
-    if (this.blinkT < 0) this.blinkT = 2 + Math.random() * 4;
-    for (const l of this.lids) l.visible = blink < 1;
-
-    // Flippers: held out for balance, wider when running, sliding or airborne.
-    const flap = c * (0.35 + 0.35 * Math.sin(t * 24)) + (st.mode === 'tumble' ? Math.sin(t * 18) * 0.5 : 0);
-    const out = 0.3 + 0.18 * w + 0.15 * Math.min(sp, 1.2) * (1 - s) + 0.85 * s + 0.6 * air + flap;
-    for (const f of this.flippers) {
-      f.pv.rotation.set(0.08 + 0.25 * s, 0, f.side * (out + Math.sin(ph) * 0.07 * w * f.side));
-    }
-
-    // Feet: stepping cycle, adapted to the terrain under each foot.
-    const A = Math.min(0.045, sp / (4 * freq));
-    const cy = Math.cos(st.yaw), sy = Math.sin(st.yaw);
-    for (let i = 0; i < 2; i++) {
-      const f = this.feet[i];
-      const p = ph + i * Math.PI;
-      const sn = Math.sin(p);
-      const lift = Math.max(0, sn) * 0.032 * w * (1 - s);
-      let z = -A * Math.cos(p) * w + 0.012;
-      let x = f.side * 0.056;
-      let footY = 0.004;
-      const kick = st.pushing ? Math.sin(t * 9 + i * Math.PI) * 0.045 : 0;
-      z = lerp(z, -0.2 + kick, s);
-      x = lerp(x, f.side * 0.05, s);
-      const sc = this.scale;
-      const wx = st.pos.x + (cy * x + sy * z) * sc;
-      const wz = st.pos.z + (-sy * x + cy * z) * sc;
-      const gy = (st.world.heightAt(wx, wz) - st.pos.y) / sc;
-      footY = lerp(gy + footY + lift, 0.035 + Math.max(0, kick) * 0.3, s);
-      footY = lerp(footY, 0.02, air);
-      f.mesh.position.set(x, footY, z);
-      f.mesh.rotation.set(lerp(-lift * 5, -1.5, s), f.side * -0.18, 0);
-      if (f.prevSin > 0 && sn <= 0 && w > 0.3 && st.grounded) this.onStep?.(i, wx, wz);
-      f.prevSin = sn;
-    }
-
-    // Down reacts to acceleration, wind and gravity.
-    _acc.copy(st.vel).sub(this.prevVel).divideScalar(Math.max(dt, 1e-3));
-    this.prevVel.copy(st.vel);
-    this.accS.lerp(_acc, Math.min(1, dt * 6));
-    const gust = 0.6 + 0.4 * Math.sin(t * 3.1 + Math.sin(t * 1.3) * 2);
-    this.disp.copy(this.accS).multiplyScalar(-0.0035)
-      .addScaledVector(st.wind, 0.0011 * gust)
-      .add(_v.set(0, -0.005, 0));
-    if (this.disp.length() > 0.02) this.disp.setLength(0.02);
-    this.pivot.getWorldQuaternion(_q).invert();
-    this.disp.applyQuaternion(_q);
-    for (const p of this.parts) p.setDisp(this.disp);
+  // Call after scene.updateMatrixWorld(): layers the procedural pose on top of
+  // the animated skeleton by transforming joint world matrices directly.
+  applyPose() {
+    if (this.headLift < 1e-3 && Math.abs(this.flipSpread) < 1e-3) return;
+    const H = this.holder.matrixWorld;
+    _hinv.copy(H).invert();
+    this.skins.forEach((mesh, mi) => {
+      const bones = mesh.skeleton.bones;
+      for (const j of ASSET.joints[mi]) {
+        if (j.head) pivotRotation(ASSET.neck, AX_X, -this.headLift * j.head, _m);
+        else if (j.flip) pivotRotation(j.flip > 0 ? ASSET.shoulderL : ASSET.shoulderR, AX_Z, this.flipSpread * j.flip, _m);
+        else continue;
+        // Model-space rigid transform to world space: H · M · H⁻¹.
+        _m.premultiply(H).multiply(_hinv);
+        bones[j.index].matrixWorld.premultiply(_m);
+      }
+    });
   }
 }

@@ -1,10 +1,33 @@
 import * as THREE from 'three';
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
-import { paint, smooth, lerp } from './fur.js';
 
 // Adult emperor penguin: ~1.1 m, black back and head, white belly, pale
 // yellow breast, orange-yellow ear patches, long beak with a pink-orange
 // mandibular plate. Sleek feathers, so a glossy material instead of fur.
+
+// Writes per-vertex colours from a painter callback.
+function paint(geo, fn) {
+  const pos = geo.attributes.position, nor = geo.attributes.normal;
+  const col = new Float32Array(pos.count * 3);
+  const p = new THREE.Vector3(), n = new THREE.Vector3();
+  const out = { color: new THREE.Color() };
+  for (let i = 0; i < pos.count; i++) {
+    p.fromBufferAttribute(pos, i);
+    n.fromBufferAttribute(nor, i);
+    fn(p, n, out);
+    col[i * 3] = out.color.r;
+    col[i * 3 + 1] = out.color.g;
+    col[i * 3 + 2] = out.color.b;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  return geo;
+}
+
+const smooth = (e0, e1, x) => {
+  const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
+  return t * t * (3 - 2 * t);
+};
+const lerp = (a, b, t) => a + (b - a) * t;
 
 const C = (hex) => new THREE.Color(hex);
 const PAL = {

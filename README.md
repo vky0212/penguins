@@ -1,6 +1,6 @@
 # 皇帝企鵝寶寶散步 · Emperor Chick Walk
 
-A browser walking simulator: you are an emperor penguin chick (*Aptenodytes forsteri*) in the crèche on the sea ice of Atka Bay, Antarctica. Built with three.js. No build step and no asset files: every model, texture and sound is generated in code.
+A browser walking simulator: you are an emperor penguin chick (*Aptenodytes forsteri*) in the crèche on the sea ice of Atka Bay, Antarctica. Built with three.js, with no build step. The chick is a rigged 3D model; the landscape, adults, textures and sounds are generated in code.
 
 ## Run
 
@@ -26,14 +26,24 @@ three.js 0.170.0 is loaded from jsDelivr through an import map, so the page need
 
 ## What is simulated
 
-- **Chick model**: proportions matched to reference photos of crèche-age chicks: a tall bottle-shaped body about 4.5 head-heights high, a short visible neck with a pale throat, even mid-grey down and long pale-grey flippers held slightly away from the body. Lathe and ellipsoid body parts with shell-textured down (one instanced mesh per part). The down grows in tufts that pinch to wispy tips, lean in random directions, are combed down and back, have paler silver tips and can carry a dusting of snow; backlit down glows at the silhouette. Head pattern follows field descriptions of crèche-age chicks: black crown from the bill over the back of the head and down the sides of the neck, white cheeks, eye "goggles", chin and throat. Small dark-brown eyes with a bare skin ring and eyelids, a slender ridged bill with a hooked tip, tapered downy flippers, and webbed three-toed feet with knuckles and long claws. The down sways with acceleration and wind.
-- **Animation**: procedural waddle (body rolls over the stance foot), feet planted on the terrain under each foot, look-around, blinking, breathing, belly-slide and tumble poses, calling with an open beak.
+- **Chick model**: the rigged "Baby Emperor Penguin (Chick)" model (`assets/chick.glb`), with fur cards over a textured body. The source export had lost the UVs that map the strand texture onto the fur cards, so viewers showed the coat as white slabs; `tools/chick-model` rebuilds per-card strand UVs (root to tip), bakes each card's colour from the body texture, keeps the five clips the game uses and quantizes the file (20 MB → 5.7 MB, no WebAssembly decoder needed).
+- **Animation**: the model's own clips for idling (looking around, flapping), walking (playback speed follows ground speed) and calling (the 叫 button). Lying down, tobogganing and tumbling are procedural: the body pitches onto its belly, the head and neck lift to look ahead, the flippers spread, and the feet paddle while pushing. The skeleton is partly flattened, so these poses rotate joints chosen by the vertices they move rather than by hierarchy. Footfalls come from the toe joints touching the ground.
 - **Physics**: fixed 120 Hz step. Surface-dependent traction: snow grips, glaze ice lets you slide and fall over if you turn hard. Slope gravity, static friction on gentle snow slopes, Coulomb friction and drag when tobogganing, belly acting as a keel, hops, circle colliders for ice blocks, adults and other chicks.
 - **Environment**: heightfield sea ice with wind-aligned drifts, snow hills, blue ice patches, pressure-ridge ice blocks, tabular icebergs on the horizon. Snow uses a generated sastrugi normal map and sun glitter.
 - **Light**: Preetham sky, image-based lighting baked from the same sky, a low polar sun with soft shadows that follow the player, fog matched to the horizon colour, HDR rendering with ACES tone mapping and bloom on high quality. The sun height is adjustable in settings.
 - **Footprints and slide troughs**: decals with normal maps derived from a depth field, so the low sun shades the dents.
 - **Sound** (Web Audio, synthesized): wind, footsteps on snow and ice, the chick's two-voice whistle, the adults' trumpeting calls.
 - **Mobile**: floating joystick, thumb-sized action buttons, safe-area insets, portrait and landscape, three quality presets (default is 平衡 on touch devices).
+
+## Rebuilding the chick model
+
+`assets/chick.glb` is generated from the source model (the `.glb` plus its `textures/` folder):
+
+```sh
+cd tools/chick-model
+npm i
+node prepare.mjs "/path/to/Baby Emperor Penguin ( Chick ).glb" ../../assets/chick.glb
+```
 
 ## Files
 
@@ -42,8 +52,9 @@ index.html          UI, styles, import map
 src/main.js         setup, game loop, NPC behaviour, HUD
 src/world.js        terrain, ice, icebergs, snow material
 src/atmosphere.js   sky, sun, environment lighting, fog
-src/fur.js          shell-fur material
-src/chick.js        chick model and animation
+src/chick.js        chick loading, clip blending, procedural belly pose
+assets/chick.glb    processed chick model
+tools/chick-model/  conversion script for the chick model
 src/adult.js        adult emperor model
 src/physics.js      character physics
 src/prints.js       footprints and belly trails

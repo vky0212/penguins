@@ -5,7 +5,7 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { World } from './world.js';
 import { Atmosphere } from './atmosphere.js';
-import { Chick } from './chick.js';
+import { Chick, loadChickAsset, setChickQuality } from './chick.js';
 import { Adult } from './adult.js';
 import { makeBody, stepCharacter } from './physics.js';
 import { Prints } from './prints.js';
@@ -32,9 +32,9 @@ const store = {
 };
 
 const PRESETS = {
-  low: { dpr: 1, shadow: 1024, shells: 10, npcShells: 6, snow: 1200, drift: 500, bloom: false, msaa: 0 },
-  medium: { dpr: 1.5, shadow: 2048, shells: 18, npcShells: 10, snow: 2600, drift: 1000, bloom: false, msaa: 2 },
-  high: { dpr: 2, shadow: 4096, shells: 30, npcShells: 14, snow: 4500, drift: 1800, bloom: true, msaa: 4 },
+  low: { dpr: 1, shadow: 1024, snow: 1200, drift: 500, bloom: false, msaa: 0 },
+  medium: { dpr: 1.5, shadow: 2048, snow: 2600, drift: 1000, bloom: false, msaa: 2 },
+  high: { dpr: 2, shadow: 4096, snow: 4500, drift: 1800, bloom: true, msaa: 4 },
 };
 let qualityName = store.get('quality', isTouch ? 'medium' : 'high');
 if (!PRESETS[qualityName]) qualityName = 'medium';
@@ -63,6 +63,7 @@ async function boot() {
   renderer.setSize(innerWidth, innerHeight, false);
 
   const scene = new THREE.Scene();
+  scene.matrixWorldAutoUpdate = false;
   const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.03, 30000);
 
   await setProgress(0.15, '堆積雪丘與海冰…');
@@ -74,20 +75,24 @@ async function boot() {
   let sunElev = store.get('sun', 11);
   atmo.setSun(sunElev);
 
-  await setProgress(0.65, '長出絨毛…');
+  await setProgress(0.55, '載入企鵝寶寶模型…');
+  await loadChickAsset('assets/chick.glb', (p) => {
+    $('load-bar').style.transform = `scaleX(${0.55 + p * 0.3})`;
+    $('load-label').textContent = `載入企鵝寶寶模型… ${Math.round(p * 100)}%`;
+  });
   const prints = new Prints(scene, world);
   const audio = new AudioFX();
   audio.setMuted(store.get('muted', false));
 
   // Player.
   const COLONY = new THREE.Vector3(15, 0, 11);
-  const player = new Chick({ shells: Q.shells });
+  const player = new Chick();
   scene.add(player.root);
   const body = makeBody(0, 0, Math.atan2(COLONY.x, COLONY.z), world);
   let walked = 0;
-  player.onStep = (i, x, z) => {
-    prints.foot(x, z, body.yaw, player.feet[i].side);
-    audio.step(body.onIce, 0.9, player.feet[i].side * 0.15);
+  player.onStep = (side, x, z) => {
+    prints.foot(x, z, body.yaw, side);
+    audio.step(body.onIce, 0.9, side * 0.15);
   };
 
   await setProgress(0.8, '集合帝企鵝群…');
@@ -113,12 +118,12 @@ async function boot() {
     const a = (i / 6) * Math.PI * 2, r = 3 + Math.random() * 4;
     const x = COLONY.x + Math.cos(a) * r, z = COLONY.z + Math.sin(a) * r;
     const scale = 0.88 + Math.random() * 0.18;
-    const chick = new Chick({ shells: Q.npcShells, scale });
+    const chick = new Chick({ scale });
     const b = makeBody(x, z, Math.random() * 6.28, world);
-    b.radius = 0.12 * scale;
+    b.radius = 0.14 * scale;
     const npc = { chick, body: b, target: new THREE.Vector3(x, 0, z), wait: Math.random() * 3, pace: 0.45 + Math.random() * 0.35, nextChirp: 4 + Math.random() * 14, replyIn: -1 };
-    chick.onStep = (k, fx, fz) => {
-      prints.foot(fx, fz, b.yaw, chick.feet[k].side, scale);
+    chick.onStep = (side, fx, fz) => {
+      prints.foot(fx, fz, b.yaw, side, scale);
       const d = camera.position.distanceTo(b.pos);
       if (d < 8) audio.step(b.onIce, 0.5 / (1 + d), panOf(b.pos));
     };
@@ -164,8 +169,7 @@ async function boot() {
     store.set('quality', name);
     renderer.setPixelRatio(Math.min(devicePixelRatio, Q.dpr));
     atmo.setShadowSize(Q.shadow);
-    player.setShells(Q.shells);
-    for (const n of npcs) n.chick.setShells(Q.npcShells);
+    setChickQuality({ alphaToCoverage: Q.msaa > 0 });
     snow.setCount(Q.snow);
     drift.setCount(Q.drift);
     bloom.enabled = Q.bloom;
@@ -296,6 +300,7 @@ async function boot() {
     st.mode = b.mode;
     st.pushing = b.pushing;
     st.slopeF = b.slopeF;
+    st.camDist = camera.position.distanceTo(b.pos);
     return st;
   }
   for (const n of npcs) n.state = { pos: n.body.pos, vel: n.body.vel, wind, world };
@@ -430,11 +435,16 @@ async function boot() {
       ui.surf.textContent = body.onIce ? '藍冰（很滑）' : '雪面';
       ui.surf.dataset.ice = String(body.onIce);
       ui.dist.textContent = walked < 1000 ? `${walked.toFixed(0)} m` : `${(walked / 1000).toFixed(2)} km`;
-      const S = { walk: body.speed > 0.05 ? (body.speed > 0.9 ? '快步搖擺' : '搖擺走路') : '站著', slide: '腹部滑行', tumble: '滑倒了！' };
+      const S = { walk: body.speed > 0.05 ? (body.speed > 0.7 ? '快步搖擺' : '搖擺走路') : '站著', slide: '腹部滑行', tumble: '滑倒了！' };
       ui.state.textContent = body.grounded ? S[body.mode] : '跳起來';
       $('act-slide').setAttribute('aria-pressed', String(body.mode === 'slide'));
     }
 
+    // World matrices are updated by hand so the chicks' procedural pose can be
+    // written straight into their joint matrices before rendering.
+    scene.updateMatrixWorld();
+    player.applyPose();
+    for (const n of npcs) n.chick.applyPose();
     composer.render(dt);
     requestAnimationFrame(frame);
   }
