@@ -162,6 +162,28 @@ export async function loadChickAsset(urls, onProgress) {
   };
 }
 
+// Per-chick down colour: `pale` (0–1) lifts the grey down toward silvery
+// white. Only mid-grey pixels change, picked by brightness, so the black cap,
+// white face, bill and feet keep their colours.
+function paleMaterial(source, pale) {
+  const m = source.clone();
+  const uPale = { value: pale };
+  m.onBeforeCompile = (shader) => {
+    shader.uniforms.uPale = uPale;
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nuniform float uPale;')
+      .replace('#include <color_fragment>', `#include <color_fragment>
+        {
+          float lum = dot(diffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722));
+          float grey = smoothstep(0.03, 0.1, lum) * (1.0 - smoothstep(0.7, 1.0, lum));
+          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.95, 0.96, 0.98) * max(lum * 1.6, 0.75), uPale * grey);
+        }`);
+  };
+  m.customProgramCacheKey = () => 'chick-pale';
+  ASSET.materials.add(m);
+  return m;
+}
+
 export function setChickQuality({ alphaToCoverage }) {
   for (const m of ASSET.materials) {
     if (m.name !== 'feather' || m.alphaToCoverage === alphaToCoverage) continue;
@@ -189,7 +211,7 @@ function pivotRotation(pivot, axis, angle, out) {
 const LAYERS = ['idle', 'idleFlap', 'walk', 'callA', 'callB'];
 
 export class Chick {
-  constructor({ scale = 1 } = {}) {
+  constructor({ scale = 1, pale = 0 } = {}) {
     this.scale = scale;
     this.root = new THREE.Group();
     this.tilt = new THREE.Group();
@@ -199,6 +221,14 @@ export class Chick {
     this.tilt.add(this.holder);
     this.model = cloneSkinned(ASSET.scene);
     this.holder.add(this.model);
+    if (pale > 0) {
+      const swapped = new Map();
+      this.model.traverse((o) => {
+        if (!o.isMesh || !['feather', 'body'].includes(o.material.name)) return;
+        if (!swapped.has(o.material)) swapped.set(o.material, paleMaterial(o.material, pale));
+        o.material = swapped.get(o.material);
+      });
+    }
 
     // Unique joints across all skins (the eye and eye-lens skins share
     // theirs), each with its head/flipper classification.

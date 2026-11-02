@@ -86,7 +86,9 @@ async function boot() {
 
   // Player.
   const COLONY = new THREE.Vector3(15, 0, 11);
-  const player = new Chick();
+  // Down colour varies from chick to chick, from mid grey to silvery white.
+  const randomPale = () => Math.pow(Math.random(), 1.4) * 0.6;
+  const player = new Chick({ pale: randomPale() });
   scene.add(player.root);
   const body = makeBody(0, 0, Math.atan2(COLONY.x, COLONY.z), world);
   let walked = 0;
@@ -118,7 +120,7 @@ async function boot() {
     const a = (i / 6) * Math.PI * 2, r = 3 + Math.random() * 4;
     const x = COLONY.x + Math.cos(a) * r, z = COLONY.z + Math.sin(a) * r;
     const scale = 0.88 + Math.random() * 0.18;
-    const chick = new Chick({ scale });
+    const chick = new Chick({ scale, pale: randomPale() });
     const b = makeBody(x, z, Math.random() * 6.28, world);
     b.radius = 0.14 * scale;
     const npc = { chick, body: b, target: new THREE.Vector3(x, 0, z), wait: Math.random() * 3, pace: 0.45 + Math.random() * 0.35, nextChirp: 4 + Math.random() * 14, replyIn: -1 };
