@@ -8,17 +8,20 @@
 //  1. Repairs the fur cards. Their material points at the white strand
 //     alpha texture through UVs that actually address the body colour atlas,
 //     so viewers show the coat as white slabs. Each card gets new strand UVs
-//     (root to tip) and its colour baked from the atlas into COLOR_0.
+//     (root to tip) and its colour baked from the atlas into COLOR_0. Cards
+//     rooted on the eyes or bill are removed and nearby ones shortened.
 //  2. Shrinks textures: diffuse to JPEG, roughness maps to 1024² JPEG.
-//  3. Keeps the clips the game uses (four idles and the walk loop), resamples
-//     them and quantizes the geometry (KHR_mesh_quantization). No meshopt or
-//     Draco, so the browser needs no WebAssembly decoder to load it.
+//  3. Keeps the clips the game uses (four idles and the walk loop) and
+//     quantizes the geometry (KHR_mesh_quantization). No meshopt or Draco,
+//     so the browser needs no WebAssembly decoder to load it. Keyframes are
+//     not resampled: this rig's joints pivot far from the skin they move, so
+//     even tiny keyframe-reduction errors visibly warp the face.
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { NodeIO } from '@gltf-transform/core';
 import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
-import { dedup, prune, quantize, resample } from '@gltf-transform/functions';
+import { dedup, prune, quantize } from '@gltf-transform/functions';
 import { PNG } from 'pngjs';
 import jpeg from 'jpeg-js';
 
@@ -171,6 +174,25 @@ function nearestDist2(p) {
   return best;
 }
 
+// Eyes and bill, so fur cards can be kept off them (in the source those
+// cards only disappeared by accident, through the broken UVs).
+const meshPoints = (name) => {
+  const a = meshByName(name)[0].listPrimitives()[0].getAttribute('POSITION').getArray();
+  const out = [];
+  for (let i = 0; i < a.length; i += 3) out.push([a[i], a[i + 1], a[i + 2]]);
+  return out;
+};
+const eyePts = meshPoints('eyes');
+const eyes = [1, -1].map((sx) => {
+  const p = eyePts.filter((q) => Math.sign(q[0]) === sx);
+  const c = [0, 1, 2].map((k) => p.reduce((acc, q) => acc + q[k], 0) / p.length);
+  return { c, r: Math.max(...p.map((q) => Math.hypot(q[0] - c[0], q[1] - c[1], q[2] - c[2]))) };
+});
+const billPts = meshPoints('peck');
+const eyeDist = (q) => Math.min(...eyes.map((e) => Math.hypot(q[0] - e.c[0], q[1] - e.c[1], q[2] - e.c[2]) / e.r));
+const billDist = (q) => Math.min(...billPts.map((b) => Math.hypot(q[0] - b[0], q[1] - b[1], q[2] - b[2])));
+const ramp = (e0, e1, x) => Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
+
 let seed = 1;
 const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
 const buffer = root.listBuffers()[0];
@@ -189,6 +211,7 @@ for (const mesh of meshByName('feather')) {
     for (let i = 0; i < n; i++) { const c = find(i); if (!cards.has(c)) cards.set(c, []); cards.get(c).push(i); }
 
     const strandUV = new Float32Array(n * 2);
+    let trimmed = 0, removed = 0;
     const along = new Float32Array(n);
     for (const verts of cards.values()) {
       const pts = verts.map(P);
@@ -213,6 +236,20 @@ for (const mesh of meshByName('feather')) {
       cross = cross.map((x) => x / cl);
       const side = resid.map((r) => r[0] * cross[0] + r[1] * cross[1] + r[2] * cross[2]);
       const slo = Math.min(...side), shi = Math.max(...side);
+      // Root = the vertex nearest the body. Cards rooted on an eye or the
+      // bill are collapsed; cards close to them are shortened so they don't
+      // grow over them.
+      const tOf = proj.map((x) => { const t = (x - lo) / (hi - lo || 1); return flip ? 1 - t : t; });
+      const rootP = pts[tOf.indexOf(Math.min(...tOf))];
+      const de = eyeDist(rootP), db = billDist(rootP);
+      const keep = de < 1.5 || db < 0.003 ? 0 : 0.2 + 0.8 * Math.min(ramp(1.5, 3, de), ramp(0.003, 0.016, db));
+      if (keep < 1) {
+        trimmed += keep === 0 ? 0 : 1;
+        removed += keep === 0 ? 1 : 0;
+        verts.forEach((vi, k) => {
+          for (let a = 0; a < 3; a++) pos[vi * 3 + a] = rootP[a] + (pts[k][a] - rootP[a]) * keep;
+        });
+      }
       const u0 = rnd() * 0.45, uw = 0.45 + rnd() * 0.1;
       verts.forEach((vi, k) => {
         let t = (proj[k] - lo) / (hi - lo || 1);
@@ -234,7 +271,8 @@ for (const mesh of meshByName('feather')) {
     }
     prim.setAttribute('COLOR_0', doc.createAccessor().setType('VEC4').setArray(col).setBuffer(buffer));
     prim.setAttribute('TEXCOORD_0', doc.createAccessor().setType('VEC2').setArray(strandUV).setBuffer(buffer));
-    console.log(`rebuilt ${cards.size} fur cards (${n} vertices)`);
+    prim.getAttribute('POSITION').setArray(pos);
+    console.log(`rebuilt ${cards.size} fur cards (${n} vertices); around eyes and bill: ${removed} removed, ${trimmed} shortened`);
   }
   const mat = mesh.listPrimitives()[0].getMaterial();
   mat.setMetallicRoughnessTexture(null).setRoughnessFactor(0.9);
@@ -257,7 +295,6 @@ for (const anim of root.listAnimations()) {
   anim.dispose();
 }
 await doc.transform(
-  resample({ tolerance: 1e-4 }),
   dedup(),
   prune({ keepAttributes: true }),
   quantize({ quantizePosition: 14, quantizeNormal: 10, quantizeTexcoord: 12, quantizeColor: 8, quantizeWeight: 8 }),
