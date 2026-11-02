@@ -76,7 +76,7 @@ async function boot() {
   atmo.setSun(sunElev);
 
   await setProgress(0.55, '載入企鵝寶寶模型…');
-  await loadChickAsset('assets/chick.glb', (p) => {
+  await loadChickAsset(['assets/chick.glb', 'assets/chick.b64.txt'], (p) => {
     $('load-bar').style.transform = `scaleX(${0.55 + p * 0.3})`;
     $('load-label').textContent = `載入企鵝寶寶模型… ${Math.round(p * 100)}%`;
   });
